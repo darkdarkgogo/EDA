@@ -432,7 +432,8 @@ git commit -m "build: pin scan agent runtime and add real smoke entry"
 ### Execution record — 2026-10-08
 
 - Source implementation, offline contract tests, and Qwen hybrid retrieval wiring are complete.
-- Offline verification: `501 passed, 6 skipped`; `compileall` and `git diff --check` pass.
+- Offline verification after review fixes: `503 passed, 6 skipped`; `compileall` and `git diff --check` pass.
+- Review findings about contradictory signal types and zero-length wrapper rows now fail closed.
 - Docker image build has not run because the local Docker Desktop engine is unavailable (`dockerDesktopLinuxEngine` named pipe is missing).
 - The licensed real-tool smoke test remains opt-in and was skipped; it needs the licensed executable, License server, evaluation model settings, and a published minimal case.
 

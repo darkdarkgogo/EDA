@@ -192,8 +192,18 @@ def _requirement_checks(requirements: Mapping[str, object], report: ReportEviden
                 continue
             port = item.get("port")
             matches = [row for row in report.signals if row.signal_type == signal_type and row.port == port]
+            conflicting = [row for row in report.signals if row.port == port and row.signal_type != signal_type]
             requested = dict(item)
             name = f"{field}[{index}]:{port}"
+            if conflicting:
+                observed_rows = [{"signal_type": row.signal_type, "port": row.port, "off_state": row.off_state,
+                                  "constant_value": row.constant_value, "usage": row.usage, "view": row.view,
+                                  "internal_clocks": row.associated_internal}
+                                 for row in (*matches, *conflicting)]
+                refs = tuple(_location_ref(row.location) for row in (*matches, *conflicting))
+                checks.append(RequirementCheck(name, requested, observed_rows, "fail",
+                    "conflicting signal types are reported for the same port", refs))
+                continue
             if not matches:
                 checks.append(RequirementCheck(name, requested, None, "unverified", "no matching signal row", ()))
                 continue
@@ -254,7 +264,7 @@ def _requirement_checks(requirements: Mapping[str, object], report: ReportEviden
             if field == "wrapper_settings" and key == "chain_length":
                 wrapper_rows = [row for row in report.chains if row.chain_class == "W"]
                 lengths = [row.length for row in wrapper_rows]
-                length_passed = bool(lengths) and all(length <= expected_value for length in lengths)
+                length_passed = bool(lengths) and all(0 < length <= expected_value for length in lengths)
                 checks.append(RequirementCheck(name + ".structure", expected_value, lengths,
                     "pass" if length_passed else "fail", "wrapper chain lengths satisfy the request" if length_passed else "wrapper chain lengths are absent or exceed the request",
                     tuple(_location_ref(row.location) for row in wrapper_rows)))

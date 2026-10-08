@@ -277,6 +277,18 @@ def test_unmapped_requirement_families_fail_closed(tmp_path, field, value):
     assert check.status == "unverified"
 
 
+def test_conflicting_signal_types_for_same_port_fail_closed(tmp_path):
+    case = _case(tmp_path, clocks=[{"port": "clk", "off_state": 0}])
+    signal = case[3].reports / "scan_signal.rpt"
+    signal.write_text(signal.read_text(encoding="utf-8") +
+                      "clk user_defined reset 1 - - - - - - Default_Partition\n",
+                      encoding="utf-8")
+    report = validate_run(*case)
+    check = next(item for item in report.requirement_checks if item.field.startswith("clocks["))
+    assert check.status == "fail"
+    assert "conflicting signal types" in check.reason
+
+
 @pytest.mark.parametrize("field,requested,chain_row,status", [
     ("clocks", [{"port": "clk", "off_state": 0}], "clk", "pass"),
     ("clocks", [{"port": "other_clk", "off_state": 0}], "clk", "fail"),
@@ -308,6 +320,26 @@ def test_wrapper_configuration_and_chain_rows_are_both_required(tmp_path):
     report = validate_run(requirements, result, diagnostics, paths)
     assert report.passed
     assert all(item.status == "pass" for item in report.requirement_checks)
+
+
+def test_zero_length_wrapper_chain_does_not_satisfy_length_limit(tmp_path):
+    requirements, result, diagnostics, paths = _case(
+        tmp_path, wrapper_settings={"chain_count": 1, "chain_length": 16, "style": "dedicated"},
+    )
+    (paths.reports / "wrapper_cfg.rpt").write_text(
+        "WrapperConfigurationParameter Value\nchain_count 1\nmax_length 16\nstyle dedicated\n",
+        encoding="utf-8",
+    )
+    (paths.reports / "scan_chain.rpt").write_text(
+        "Chain Length Input Output ScanEnable Clocks Partition ChainProperty\nW wrp0 0 wsi wso wrp_shift wrp_clk Default_Partition tool_created\n",
+        encoding="utf-8",
+    )
+
+    report = validate_run(requirements, result, diagnostics, paths)
+    structure = next(item for item in report.requirement_checks
+                     if item.field == "wrapper_settings.chain_length.structure")
+    assert structure.status == "fail"
+    assert not report.passed
 
 
 def test_input_hash_mutation_fails(tmp_path):
