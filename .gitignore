@@ -1,0 +1,7 @@
+# Ignore everything in the repository root.
+/*
+
+# Keep this rule file and the submission directory.
+!/.gitignore
+!/agent_submission/
+!/agent_submission/**

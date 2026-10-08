@@ -1,0 +1,2 @@
+-r submission/requirements.txt
+pytest
