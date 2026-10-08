@@ -79,7 +79,7 @@ def test_chain_report_facts_preserve_evidence_and_lengths():
 
 
 @pytest.mark.parametrize("line", [
-    "[INFO] insert_scan completed successfully",
+    "[INFO] insert_dft_logic completed successfully",
     "Scan insertion completed successfully",
 ])
 def test_insertion_completion_requires_explicit_success_evidence(line):
@@ -87,9 +87,10 @@ def test_insertion_completion_requires_explicit_success_evidence(line):
 
 
 @pytest.mark.parametrize("line", [
-    "[INFO] insert_scan started",
-    "set step insert_scan completed",
-    "[ERROR] insert_scan completed unsuccessfully",
+    "[INFO] insert_dft_logic started",
+    "set step insert_dft_logic completed",
+    "[ERROR] insert_dft_logic completed unsuccessfully",
+    "[INFO] insert_scan completed successfully",
 ])
 def test_insertion_mentions_do_not_prove_completion(line):
     assert parse_tool_log(line).insertion_facts == ()

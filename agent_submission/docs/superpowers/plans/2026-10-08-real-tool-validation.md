@@ -6,7 +6,7 @@
 
 **Architecture:** Keep LangGraph as the bounded orchestrator and the LLM as a structured proposal generator. Add a documented Tcl allowlist, an explicit runner launch mode, report-specific parsers, and field-level deterministic checks whose evidence closes into `decision_log.json`.
 
-**Tech Stack:** Python 3, LangGraph, OpenAI-compatible SDK, pypdf, subprocess, pytest, Docker.
+**Tech Stack:** Python 3, LangGraph, OpenAI-compatible SDK, pypdf, SentenceTransformers, Qwen3 Embedding, in-memory cosine vectors, subprocess, pytest, Docker.
 
 **Spec:** `agent_submission/docs/superpowers/specs/2026-10-08-real-tool-validation-design.md`
 
@@ -21,6 +21,7 @@
 - Keep the absolute case deadline, ten-second finalization reserve, and maximum tool-run limit.
 - Do not copy either PDF into the submission image and do not modify `reference_submission`.
 - Run focused tests per task and one full offline suite after all tasks.
+- Bake the pinned Qwen3 model into Docker, precompute manual vectors at image build when the official base includes the PDF, and preserve keyword-only fallback.
 
 ---
 
@@ -350,7 +351,7 @@ git commit -m "feat: close report-driven scan workflow"
 - Modify: `agent_submission/tests/test_package.py`
 
 **Interfaces:**
-- Pins: `langgraph==1.2.14`, `openai==3.26.0`, `pypdf==6.11.0`, and `pytest==9.1.1`.
+- Pins: `langgraph==1.2.14`, `openai==3.26.0`, `pypdf==6.11.0`, `torch==2.14.1`, `transformers==5.19.0`, `sentence-transformers==6.1.0`, and `pytest==9.1.1`.
 - Produces: opt-in smoke test controlled by `DFTEXP_REAL_SMOKE=1`, `DFTEXP_SCAN_EXECUTABLE`, `DFTEXP_SMOKE_INPUT`, and the existing License environment.
 
 - [ ] **Step 1: Write failing package pin tests**
@@ -359,12 +360,13 @@ git commit -m "feat: close report-driven scan workflow"
 def test_runtime_dependencies_are_exactly_pinned():
     assert Path("submission/requirements.txt").read_text().splitlines() == [
         "langgraph==1.2.14", "openai==3.26.0", "pypdf==6.11.0",
+        "torch==2.14.1", "transformers==5.19.0", "sentence-transformers==6.1.0",
     ]
 ```
 
 - [ ] **Step 2: Pin dependencies and verify an isolated resolver/import**
 
-Create a temporary virtual environment outside the submission context, install both requirements files once, and run imports for `langgraph`, `openai`, and `pypdf`. Remove the temporary environment after verification.
+Create a temporary virtual environment outside the submission context, install both requirements files once, and run imports for `langgraph`, `openai`, `pypdf`, `torch`, `transformers`, and `sentence_transformers`. Remove the temporary environment after verification.
 
 - [ ] **Step 3: Add the opt-in real-tool smoke test**
 
@@ -379,7 +381,8 @@ README must state that `file_flag` remains the default pending a licensed `dftex
 Run from `agent_submission`:
 
 ```bash
-python -m pytest -q
+mkdir -p .pytest-tmp
+python -m pytest -q --basetemp .pytest-tmp/plan-suite
 python -m compileall submission
 git diff --check
 ```
@@ -395,7 +398,43 @@ git commit -m "build: pin scan agent runtime and add real smoke entry"
 
 ---
 
+### Task 7: Local Qwen hybrid manual retrieval for Docker
+
+**Files:**
+- Create: `agent_submission/submission/scan_agent/embeddings.py`
+- Create: `agent_submission/submission/scan_agent/manual_cache.py`
+- Modify: `agent_submission/submission/scan_agent/manual.py`
+- Modify: `agent_submission/submission/scan_agent/workflow.py`
+- Modify: `agent_submission/Dockerfile`
+- Modify: `agent_submission/submission/requirements.txt`
+- Modify: `agent_submission/README.md`
+- Test: `agent_submission/tests/test_embeddings.py`
+- Test: `agent_submission/tests/test_manual.py`
+- Test: `agent_submission/tests/test_package.py`
+
+**Interfaces:**
+- Produces: local `QwenEmbedder` document and instruction-aware query embedding methods.
+- Extends: `ManualIndex` with in-memory vectors and deterministic reciprocal-rank fusion with existing keyword scores.
+- Produces: a build-time manual cache keyed to PDF SHA-256 and chunk page/index identities.
+
+- [ ] **Step 1: Cover Qwen adapter options and Chinese-query to English-manual retrieval using fake embeddings**
+- [ ] **Step 2: Implement local-only loading and deadline-bounded batches of normalized Qwen embeddings**
+- [ ] **Step 3: Fuse semantic and keyword ranks, preserving keyword-only retrieval if model/cache is missing**
+- [ ] **Step 4: Validate cached vectors against the exact manual hash and stable chunk identities**
+- [ ] **Step 5: Pin CPU dependencies and Qwen revision in Docker, and precompute vectors when the base image already contains the manual PDF**
+- [ ] **Step 6: Document that embeddings are local/offline, LLM remains API-backed, and the image is several gigabytes**
+- [ ] **Step 7: Run focused and full offline verification; build Docker only when the official base image is available locally**
+
+---
+
 ## Final Acceptance
+
+### Execution record — 2026-10-08
+
+- Source implementation, offline contract tests, and Qwen hybrid retrieval wiring are complete.
+- Offline verification: `501 passed, 6 skipped`; `compileall` and `git diff --check` pass.
+- Docker image build has not run because the local Docker Desktop engine is unavailable (`dockerDesktopLinuxEngine` named pipe is missing).
+- The licensed real-tool smoke test remains opt-in and was skipped; it needs the licensed executable, License server, evaluation model settings, and a published minimal case.
 
 - [ ] All generated dofiles use documented DFTEXP_Scan commands.
 - [ ] Both launch modes are covered offline and the selected mode is recorded.
@@ -405,4 +444,6 @@ git commit -m "build: pin scan agent runtime and add real smoke entry"
 - [ ] Failed validation never publishes `final_results`.
 - [ ] Formal `.case_ready`, budgets, input integrity, and netlist-modification prohibition remain intact.
 - [ ] Dependencies are exactly pinned and import together.
+- [ ] Docker contains the revision-pinned Qwen model and requires no embedding API or vector database.
+- [ ] Manual retrieval uses hash-matched vectors in memory with deterministic keyword-only fallback.
 - [ ] Real EDA validation is either genuinely executed with retained evidence or explicitly reported as externally blocked.

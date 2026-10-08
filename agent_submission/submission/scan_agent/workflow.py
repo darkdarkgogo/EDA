@@ -3,6 +3,7 @@
 from dataclasses import asdict, dataclass, field
 from copy import deepcopy
 import hashlib
+import json
 import math
 import os
 from pathlib import Path
@@ -30,7 +31,8 @@ from .inputs import (InputMutationError, assert_inputs_unchanged, classify_task,
 from .llm import (LLMClient, LLMConfigurationError, LLMOutputError, LLMTransportError,
                   Requirements, _requirements, extract_requirements, requirements_data)
 from .manual import ManualChunk, ManualIndex, ManualLoadResult, load_manual
-from .runner import ToolResult, run_scan_tool
+from .runner import LaunchMode, ToolResult, run_scan_tool
+from .reports import ReportEvidence, collect_report_evidence
 from .state import AgentStatus, Budget, InputInventory
 from .validation import ValidationReport, validate_run
 
@@ -52,12 +54,16 @@ class WorkflowDependencies:
     clock: Callable[[], float] = time.monotonic
     ready_waiter: Callable = wait_for_case_ready
     executable: tuple[str, ...] = ("dftexp_scan",)
+    launch_mode: LaunchMode = "file_flag"
     env: dict[str, str] = field(default_factory=dict)
     manual_path: Path = Path("/opt/dftexp_scan/doc/Scan_User_Manual.pdf")
 
     @classmethod
     def from_env(cls) -> "WorkflowDependencies":
-        return cls(client=LLMClient.from_env())
+        mode = os.environ.get("DFTEXP_SCAN_LAUNCH_MODE", "file_flag")
+        if mode not in {"file_flag", "stdin_source"}:
+            raise LLMConfigurationError("DFTEXP_SCAN_LAUNCH_MODE must be file_flag or stdin_source")
+        return cls(client=LLMClient.from_env(), launch_mode=mode)
 
 
 @dataclass(frozen=True)
@@ -85,6 +91,7 @@ class WorkflowState(TypedDict, total=False):
     paths: RunPaths
     tool_result: ToolResult
     diagnostics: DiagnosticSummary
+    report_evidence: ReportEvidence
     validation: ValidationReport
     now: float
     requires_netlist_repair: bool
@@ -256,7 +263,14 @@ def _chunks(
 ) -> list:
     manual = state.get("manual")
     return manual.index.search(
-        terms, deadline_monotonic=deadline_monotonic, clock=clock,
+        terms,
+        deadline_monotonic=deadline_monotonic,
+        clock=clock,
+        semantic_query=(
+            f"Task type: {state.get('task_type', '')}. Retrieval focus: {'; '.join(terms)}. "
+            f"Scan requirements: {json.dumps(requirements_data(state['requirements']), ensure_ascii=False, sort_keys=True)}"
+            if "requirements" in state else "; ".join(terms)
+        ),
     ) if manual and manual.index else []
 
 
@@ -297,8 +311,13 @@ def _collect_work(
         if source.is_symlink() or not source.resolve().is_relative_to(paths.work.resolve()):
             raise ValueError("tool work artifact escapes its run directory")
         if source.is_file():
-            directory = paths.reports if source.suffix.lower() in {".rpt", ".txt", ".log"} else paths.deliverables
-            target = directory / source.relative_to(paths.work)
+            relative = source.relative_to(paths.work)
+            if relative.parts and relative.parts[0] in {"deliverables", "reports"}:
+                directory = paths.deliverables if relative.parts[0] == "deliverables" else paths.reports
+                relative = Path(*relative.parts[1:])
+            else:
+                directory = paths.reports if source.suffix.lower() in {".rpt", ".txt", ".log"} else paths.deliverables
+            target = directory / relative
             if target.exists():
                 if not _same_files(source, target, deadline_monotonic, clock):
                     raise ValueError("conflicting tool artifacts")
@@ -349,7 +368,13 @@ def _publish_decision(
         "status": state["status"], "final_run": state.get("final_run"),
         "failure_reason": state.get("failure_reason"), "task_type": state.get("task_type"),
         "manual_error": state.get("manual_error"),
-        "manual": {"available": manual.available if manual else None, "error": state.get("manual_error")},
+        "manual": {
+            "available": manual.available if manual else None,
+            "error": state.get("manual_error"),
+            "semantic_available": manual.semantic_available if manual else None,
+            "semantic_error": manual.semantic_error if manual else None,
+            "retrieval": "hybrid_qwen3_keyword" if manual and manual.semantic_available else "keyword_only",
+        },
         "requirement_mapping": build_requirement_mapping(
             requirements, configurations, state["validation_results"], deadline_monotonic, clock,
         ),
@@ -536,10 +561,10 @@ def build_workflow(dependencies: WorkflowDependencies) -> CompiledStateGraph:
             diagnostics = parse_tool_log("\n".join(details))
             return repair_attempt(state, {"source": "original_static_diagnostics.json", "locator": "rejections and missing_phases",
                                           "dofile_hash": _hash(original)},
-                                  original, diagnostics, [], ["examine_scan", "insert_scan"])
+                                  original, diagnostics, [], ["examine_scan_drc", "examine_scan_chain", "insert_dft_logic"])
         proposal = call_model(state, dependencies.initial_generator, state["requirements"],
                                                   state["inventory"], _chunks(
-                                                      state, ["scan", "insert_scan"],
+                                                  state, ["scan", "insert_dft_logic"],
                                                       work_deadline(state), dependencies.clock,
                                                   ))
         return _accept_proposal(proposal, state)
@@ -575,7 +600,11 @@ def build_workflow(dependencies: WorkflowDependencies) -> CompiledStateGraph:
         if timeout <= 0:
             return _failure(AgentStatus.BUDGET_EXHAUSTED, "wall-time reserve reached before execution")
         try:
-            result = dependencies.tool_runner(paths, paths.dofile, dependencies.executable, timeout, dependencies.env)
+            if dependencies.launch_mode == "file_flag":
+                result = dependencies.tool_runner(paths, paths.dofile, dependencies.executable, timeout, dependencies.env)
+            else:
+                result = dependencies.tool_runner(paths, paths.dofile, dependencies.executable, timeout,
+                                                  dependencies.env, launch_mode=dependencies.launch_mode)
             result = _check_tool_result(result, paths)
         except Exception as error:
             # An attempted run remains auditable even if a collaborator raises.
@@ -602,9 +631,8 @@ def build_workflow(dependencies: WorkflowDependencies) -> CompiledStateGraph:
             return {}
         deadline = work_deadline(state)
         _collect_work(state["paths"], deadline, dependencies.clock)
-        return {"diagnostics": parse_tool_log(
-            _read_text(state["paths"].log, deadline, dependencies.clock),
-        )}
+        return {"diagnostics": parse_tool_log(_read_text(state["paths"].log, deadline, dependencies.clock)),
+                "report_evidence": collect_report_evidence(state["paths"], deadline, dependencies.clock)}
 
     def validate(state):
         if state.get("status") or state.get("requires_netlist_repair") or state.get("repeated_dofile"):
@@ -614,7 +642,7 @@ def build_workflow(dependencies: WorkflowDependencies) -> CompiledStateGraph:
         try:
             report = validate_run(
                 requirements, state["tool_result"], state["diagnostics"], state["paths"],
-                work_deadline(state), dependencies.clock,
+                work_deadline(state), dependencies.clock, state.get("report_evidence"),
             )
         except DeadlineExceeded as error:
             report = ValidationReport(
@@ -625,6 +653,7 @@ def build_workflow(dependencies: WorkflowDependencies) -> CompiledStateGraph:
         write_json_atomic(state["paths"].root / "validation.json", record)
         return {"validation": report, "validation_results": [*state["validation_results"],
                 {"run_id": state["paths"].run_id, "passed": report.passed,
+                 "requirement_checks": [asdict(item) for item in report.requirement_checks],
                  "path": (state["paths"].root / "validation.json").relative_to(state["output_dir"]).as_posix()}],
                 "now": dependencies.clock()}
 

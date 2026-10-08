@@ -18,9 +18,15 @@ from test_llm import FakeTransport, requirement_data
 SAFE = """load_lib /input/cells.lib
 load_netlist /input/pre_scan.v
 present_design top
-examine_scan
-insert_scan
-dump_netlist -file post_scan.v
+set_scan_signal -type clock -port clk -off_state 0
+set_scan_signal -type scan_enable -port scan_en -off_state 0
+examine_scan_drc -verbose -file reports/drc.rpt
+examine_scan_chain
+insert_dft_logic
+rpt_scan_signal > reports/scan_signal.rpt
+rpt_scan_cfg > reports/scan_cfg.rpt
+rpt_scan_chain -class all > reports/scan_chain.rpt
+dump_netlist -file deliverables/post_scan.v
 exit
 """
 
@@ -66,7 +72,7 @@ def test_all_required_phases_and_read_only_protected_paths_are_accepted():
 ])
 def test_every_output_destination_must_be_normalized_relative(destination):
     line = f'dump_netlist -file "{destination}"'
-    report = validate_dofile_candidate(SAFE.replace("dump_netlist -file post_scan.v", line))
+    report = validate_dofile_candidate(SAFE.replace("dump_netlist -file deliverables/post_scan.v", line))
     assert not report.safe
     assert any(item.line == line and item.reason for item in report.rejections)
 
@@ -87,23 +93,48 @@ def test_execution_resolution_rejects_relative_symlink_escape(tmp_path):
 
 
 def test_secondary_output_destination_cannot_hide_absolute_write():
-    line = "dump_netlist -file post_scan.v -output /etc/hidden.v"
-    report = validate_dofile_candidate(SAFE.replace("dump_netlist -file post_scan.v", line))
+    line = "dump_netlist -file deliverables/post_scan.v -output /etc/hidden.v"
+    report = validate_dofile_candidate(SAFE.replace("dump_netlist -file deliverables/post_scan.v", line))
     assert not report.safe
     assert any(item.line == line for item in report.rejections)
 
 
 def test_static_output_option_assignment_and_continuations_are_accepted():
-    text = SAFE.replace("-file post_scan.v", "-file=post_scan.v")
+    text = SAFE.replace("-file deliverables/post_scan.v", "-file=deliverables/post_scan.v")
     assert validate_dofile_candidate(text).safe
-    text = SAFE.replace("-file post_scan.v", "-file " + "\\" + "\npost_scan.v")
+
+
+@pytest.mark.parametrize("line", [
+    "rpt_scan_signal reports/scan_signal.rpt",
+    "rpt_scan_signal >> reports/scan_signal.rpt",
+    "rpt_scan_signal > /output/scan_signal.rpt",
+    "rpt_scan_signal > ../scan_signal.rpt",
+    "rpt_scan_signal > reports/a.rpt > reports/b.rpt",
+])
+def test_report_redirection_requires_one_safe_static_destination(line):
+    report = validate_dofile_candidate(SAFE.replace(
+        "rpt_scan_signal > reports/scan_signal.rpt", line,
+    ))
+    assert not report.safe
+    assert any(item.line == line for item in report.rejections)
+
+
+@pytest.mark.parametrize("obsolete", ["examine_scan", "insert_scan"])
+def test_placeholder_commands_do_not_satisfy_documented_phases(obsolete):
+    documented = SAFE.replace("examine_scan_drc", obsolete) if obsolete == "examine_scan" else SAFE.replace("insert_dft_logic", obsolete)
+    report = validate_dofile_candidate(documented)
+    assert not report.safe
+    assert report.missing_phases
+    text = SAFE.replace("-file deliverables/post_scan.v", "-file " + "\\" + "\ndeliverables/post_scan.v")
     assert validate_dofile_candidate(text).safe
 
 
 @pytest.mark.parametrize("command,phase", [
     ("load_lib", "load_library"), ("load_netlist", "load_netlist"),
-    ("present_design", "present"), ("examine_scan", "drc"),
-    ("insert_scan", "insertion"), ("dump_netlist", "output"),
+    ("present_design", "present"), ("examine_scan_drc", "drc"),
+    ("examine_scan_chain", "preview"), ("insert_dft_logic", "insertion"),
+    ("rpt_scan_signal", "signal_report"), ("rpt_scan_cfg", "config_report"),
+    ("rpt_scan_chain", "chain_report"), ("dump_netlist", "output"),
 ])
 def test_each_missing_required_phase_is_reported(command, phase):
     report = validate_dofile_candidate("\n".join(line for line in SAFE.splitlines() if not line.startswith(command)))
@@ -112,13 +143,13 @@ def test_each_missing_required_phase_is_reported(command, phase):
 
 
 def test_comments_and_quoted_command_names_do_not_prove_phases():
-    report = validate_dofile_candidate("# " + SAFE.replace("\n", "\n# ") + '\nset example "insert_scan"\n')
+    report = validate_dofile_candidate("# " + SAFE.replace("\n", "\n# ") + '\nset example "insert_dft_logic"\n')
     assert not report.safe
     assert "insertion" in report.missing_phases
 
 
-@pytest.mark.parametrize("text", ["", "  \n# comment\n", SAFE.replace("examine_scan", "if {0} {examine_scan}"),
-                                       SAFE.replace("insert_scan", "exit\ninsert_scan")])
+@pytest.mark.parametrize("text", ["", "  \n# comment\n", SAFE.replace("examine_scan_drc", "if {0} {examine_scan_drc}"),
+                                       SAFE.replace("insert_dft_logic", "exit\ninsert_dft_logic")])
 def test_empty_conditional_or_unreachable_phases_cannot_pass(text):
     assert not validate_dofile_candidate(text).safe
 
@@ -126,13 +157,29 @@ def test_empty_conditional_or_unreachable_phases_cannot_pass(text):
 def test_phase_order_and_output_destination_are_required():
     reversed_phases = "\n".join(reversed(SAFE.splitlines()[:-1])) + "\nexit\n"
     assert not validate_dofile_candidate(reversed_phases).safe
-    assert not validate_dofile_candidate(SAFE.replace("-file post_scan.v", "-file")).safe
+    assert not validate_dofile_candidate(SAFE.replace("-file deliverables/post_scan.v", "-file")).safe
+
+
+@pytest.mark.parametrize("line", ["set_scan_unknown -port x", "rpt_scan_secret > reports/x.rpt"])
+def test_unknown_tool_commands_with_documented_prefixes_are_rejected(line):
+    report = validate_dofile_candidate(SAFE.replace("exit", line + "\nexit"))
+    assert not report.safe
+    assert any("unsupported Tcl command" in item.reason for item in report.rejections)
+
+
+def test_configuration_commands_must_precede_drc():
+    moved = SAFE.replace("set_scan_signal -type scan_enable -port scan_en -off_state 0\n", "")
+    moved = moved.replace("examine_scan_drc -verbose -file reports/drc.rpt",
+                          "examine_scan_drc -verbose -file reports/drc.rpt\nset_scan_signal -type scan_enable -port scan_en -off_state 0")
+    report = validate_dofile_candidate(moved)
+    assert not report.safe
+    assert any("must precede examine_scan_drc" in item.reason for item in report.rejections)
 
 
 def test_variable_resolution_prevents_protected_output_and_allows_input_variables():
     text = "set input_dir /input\nset output_dir reports\n" + SAFE.replace("/input/", "$input_dir/")
     assert validate_dofile_candidate(text).safe
-    text = "set destination /input\n" + SAFE.replace("-file post_scan.v", "-file $destination/post_scan.v")
+    text = "set destination /input\n" + SAFE.replace("-file deliverables/post_scan.v", "-file $destination/post_scan.v")
     report = validate_dofile_candidate(text)
     assert not report.safe
     assert any(item.line == "dump_netlist -file $destination/post_scan.v" for item in report.rejections)
@@ -167,7 +214,7 @@ def test_required_input_and_presentation_phases_accept_resolved_nonempty_variabl
     ("dump_netlist -file -format verilog", ""),
 ])
 def test_output_phase_requires_a_nonempty_resolved_filename(line, prefix):
-    report = validate_dofile_candidate(prefix + SAFE.replace("dump_netlist -file post_scan.v", line))
+    report = validate_dofile_candidate(prefix + SAFE.replace("dump_netlist -file deliverables/post_scan.v", line))
     assert not report.safe
     assert "output" in report.missing_phases
     assert any(item.line == line and "filename" in item.reason for item in report.rejections)
@@ -214,7 +261,7 @@ def test_rejections_retain_exact_whitespace_and_line_number():
     line = '  dump_netlist -file "/submission/post_scan.v"  '
     report = validate_dofile_candidate(SAFE + line + "\n")
     rejection = next(item for item in report.rejections if item.line == line)
-    assert rejection.line_number == 8
+    assert rejection.line_number == 14
     assert "protected" in rejection.reason
 
 
@@ -231,7 +278,7 @@ def test_generation_uses_only_requirements_inventory_and_manual_data():
 
 def test_safety_correction_receives_exact_rejected_line_and_reason_once():
     bad_line = '  dump_netlist -file "/input/post_scan.v"  '
-    bad = SAFE.replace("dump_netlist -file post_scan.v", bad_line)
+    bad = SAFE.replace("dump_netlist -file deliverables/post_scan.v", bad_line)
     transport = FakeTransport([json.dumps(proposal(bad)), json.dumps(proposal())])
     result = generate_initial_dofile(LLMClient(transport=transport, model="m"), requirements(), InputInventory([]), [])
     assert result.dofile == SAFE
@@ -243,7 +290,7 @@ def test_safety_correction_receives_exact_rejected_line_and_reason_once():
 
 
 def test_second_unsafe_candidate_fails_without_additional_requests():
-    bad = SAFE.replace("insert_scan", "# insert_scan")
+    bad = SAFE.replace("insert_dft_logic", "# insert_dft_logic")
     transport = FakeTransport([json.dumps(proposal(bad))] * 2)
     with pytest.raises(LLMOutputError):
         generate_initial_dofile(LLMClient(transport=transport, model="m"), requirements(), InputInventory([]), [])

@@ -33,8 +33,8 @@ class FakeTransport:
 def requirement_data():
     return {
         "task_type": "task1", "top_module": "top", "netlists": ["pre_scan.v"],
-        "libraries": ["cells.lib"], "ctl_files": [], "clocks": [{"port": "clk"}],
-        "resets": [], "constants": [], "scan_enables": [{"port": "scan_en"}],
+        "libraries": ["cells.lib"], "ctl_files": [], "clocks": [{"port": "clk", "off_state": 0}],
+        "resets": [], "constants": [], "scan_enables": [{"port": "scan_en", "off_state": 0, "view": "spec", "usage": "all"}],
         "chain_constraints": {"chain_count": 2, "max_length": 100},
         "partitions": [], "clock_domains": [], "edge_policy": None,
         "lockup": {}, "scan_segments": [], "wrapper_settings": {},
@@ -145,6 +145,14 @@ def test_extract_returns_every_typed_field_and_serializes_only_supplied_facts():
     {"chain_constraints": {"chain_count": True}}, {"chain_constraints": {"max_length": 0}},
     {"required_outputs": ["../post_scan.v"]}, {"wall_time_seconds": 999},
     {"max_tool_runs": 99}, {"task_type": "task2"}, {"clocks": ["clk"]},
+    {"clocks": [{"port": "clk", "off_state": 2}]},
+    {"clocks": [{"port": "clk", "off_state": 0, "surprise": True}]},
+    {"scan_enables": [{"port": "scan_en"}]},
+    {"constants": [{"port": "test_mode"}]},
+    {"lockup": {"add_lockup": True}},
+    {"lockup": {"add_lockup": "true", "insert_terminal_lockup": False}},
+    {"wrapper_settings": {"chain_count": 1, "chain_length": 10}},
+    {"wrapper_settings": {"chain_count": 1, "chain_length": 10, "style": "dedicated", "extra": 1}},
 ])
 def test_requirement_schema_or_input_failure_gets_one_correction(change):
     transport = FakeTransport([json.dumps({**requirement_data(), **change}), json.dumps(requirement_data())])

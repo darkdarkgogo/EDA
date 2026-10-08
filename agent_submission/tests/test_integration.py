@@ -49,7 +49,7 @@ def test_offline_success_has_closed_decision_log(tmp_path, task2):
     assert payload["task_type"] == ("task2" if task2 else "task1")
     validate_references(output, payload)
     requirements = json.loads((output / "requirements.json").read_text(encoding="utf-8"))
-    assert {entry["field"]: json.loads(entry["value_json"]) for entry in payload["requirement_mapping"]} == requirements
+    assert {entry["field"]: json.loads(entry["requested_json"]) for entry in payload["requirement_mapping"]} == requirements
     assert payload["manual"]["available"] is False
     assert payload["token_usage"] == [{"model": "test-only", "prompt_tokens": 11,
                                        "completion_tokens": 7, "total_tokens": 18}] * 2
@@ -87,7 +87,7 @@ def test_tool_unavailable_never_creates_fake_final_artifacts(tmp_path):
 def test_two_run_repair_closes_found_diagnosis_fix_verify(tmp_path, task2):
     case = make_task1_case(tmp_path)
     if task2:
-        (case / "original.dofile").write_text("# original\n" + SAFE_DOFILE.replace("insert_scan", "exec forbidden"), encoding="utf-8")
+        (case / "original.dofile").write_text("# original\n" + SAFE_DOFILE.replace("insert_dft_logic", "exec forbidden"), encoding="utf-8")
     output = tmp_path / "output"
     result = run_agent(case, output, dependencies("repair"))
     payload = json.loads((output / "decision_log.json").read_text(encoding="utf-8"))
@@ -188,9 +188,9 @@ def test_publication_rechecks_all_promoted_artifacts(tmp_path, monkeypatch, muta
     def tamper(output, paths, required, *args):
         manifest = original(output, paths, required, *args)
         if mutate in {"final", "both"}:
-            (output / "final_results/reports/scan.rpt").write_text("changed", encoding="utf-8")
+            (output / "final_results/reports/scan_signal.rpt").write_text("changed", encoding="utf-8")
         if mutate in {"source", "both"}:
-            (paths.reports / "scan.rpt").write_text("changed", encoding="utf-8")
+            (paths.reports / "scan_signal.rpt").write_text("changed", encoding="utf-8")
         if mutate == "extra":
             (output / "final_results/deliverables/extra.v").write_text("changed", encoding="utf-8")
         return manifest
@@ -317,7 +317,7 @@ def test_failed_success_publication_retains_usage_and_prior_audit_evidence(tmp_p
     assert payload["token_usage"] == [{"model": "test-only", "prompt_tokens": 11,
                                       "completion_tokens": 7, "total_tokens": 18}] * 3
     assert payload["token_usage_available"] is True
-    assert {item["field"]: json.loads(item["value_json"]) for item in payload["requirement_mapping"]} == json.loads(
+    assert {item["field"]: json.loads(item["requested_json"]) for item in payload["requirement_mapping"]} == json.loads(
         (output / "requirements.json").read_text(encoding="utf-8"))
     assert payload["manual"]["available"] is False
     assert len(payload["tool_runs"]) == len(payload["validation_results"]) == 2

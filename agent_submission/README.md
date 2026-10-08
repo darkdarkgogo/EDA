@@ -1,7 +1,7 @@
 # Scan Insertion Agent — phase one
 
 Python 3.12 on the official `scan-agent-base:ubuntu24` image runs a LangGraph
-workflow with `openai`, `langgraph`, and `pypdf`. Use the evaluation-provided
+workflow with `openai`, `langgraph`, `pypdf`, and a local Qwen3 embedding model. Use the evaluation-provided
 DeepSeek V4 Pro endpoint and model. Task one generates a dofile; task two repairs
 `original.dofile`. Python validates real `dftexp_scan` results before declaring
 success. Phase one returns `unsupported_netlist_repair` when a diagnosis requires
@@ -15,8 +15,28 @@ Run from `agent_submission/`, the build-context root containing `Dockerfile` and
 ```bash
 docker image inspect scan-agent-base:ubuntu24
 docker build -t scan-agent:phase1 .
-docker run --rm --entrypoint python3 scan-agent:phase1 -B -c 'import openai, langgraph, pypdf'
+docker run --rm --entrypoint python3 scan-agent:phase1 -B -c 'import openai, langgraph, pypdf, torch, transformers, sentence_transformers'
 ```
+
+The build needs internet access to install pinned CPU inference packages and
+download the pinned `Qwen/Qwen3-Embedding-0.6B` revision. The model weights
+and, when the base image contains the Scan User Manual, its precomputed manual
+vectors are baked into the image. Runtime embedding is offline and uses CPU;
+there is no embedding API key or separate vector database. The LLM still uses
+the evaluation-provided OpenAI-compatible API. The image is several gigabytes,
+so allow time and storage for the build and upload.
+
+To transfer the complete image to a server without pulling from a registry:
+
+```bash
+docker save -o scan-agent-phase1.tar scan-agent:phase1
+scp scan-agent-phase1.tar USER@SERVER:/path/to/upload/
+ssh USER@SERVER 'docker load -i /path/to/upload/scan-agent-phase1.tar'
+```
+
+The transferred image already contains the embedding model and manual cache;
+the server does not need Hugging Face access. It still needs network access to
+the configured LLM endpoint and the DFTEXP license server.
 
 The image entrypoint is `/submission/agent_system`; it forwards CLI arguments
 and runs Python with bytecode writes disabled. Only `submission/` is copied into
@@ -48,7 +68,11 @@ the case budget starts after this sentinel appears. Leave
 `SCAN_AGENT_SKIP_READY_WAIT` unset in formal mode. `limitations.md` supplies the
 wall-time budget and any tool-run limit; the default maximum is three tool runs,
 with ten seconds reserved for finalization. The tool manual is read from
-`/opt/dftexp_scan/doc/Scan_User_Manual.pdf`; an unavailable manual is recorded.
+`/opt/dftexp_scan/doc/Scan_User_Manual.pdf`. Retrieval combines exact keyword
+ranking with Qwen semantic vectors held in memory. Docker builds create the
+vector cache from the manual already present in the official base image; the
+PDF is not copied into the submission image. If the model or matching cache is
+unavailable, the agent records that state and retains keyword-only retrieval.
 
 ## Local pre-populated case
 
@@ -72,9 +96,32 @@ test doubles and establish workflow behavior, not real EDA quality:
 
 ```bash
 python -m pip install -r requirements-dev.txt
-python -m pytest -v
+mkdir -p .pytest-tmp
+python -m pytest -v --basetemp .pytest-tmp/local-suite
 python -m compileall submission
 ```
+
+## Real-tool smoke test
+
+`file_flag` remains the production default until a licensed `dftexp_scan -h` or
+minimal-run confirms the correct launch interface. Set
+`DFTEXP_SCAN_LAUNCH_MODE=file_flag` or `stdin_source` to select the audited
+mode. Both modes are covered by the fake executable in offline tests.
+
+With a licensed executable, model credentials, and a minimal published case,
+run the opt-in smoke test (the case must contain `.case_ready`):
+
+```bash
+DFTEXP_REAL_SMOKE=1 \
+DFTEXP_SCAN_EXECUTABLE=/opt/dftexp_scan/bin/dftexp_scan \
+DFTEXP_SMOKE_INPUT=/absolute/minimal/case/input \
+DFTEXP_SMOKE_OUTPUT=/absolute/minimal/case/output \
+python -m pytest -q tests/test_real_dftexp_scan.py
+```
+
+The smoke test records the real `-h` output and retains the agent's reports,
+logs, and decision audit. It is skipped as externally blocked when the
+executable, License, case, or evaluation model settings are unavailable.
 
 ## Results and failure behavior
 

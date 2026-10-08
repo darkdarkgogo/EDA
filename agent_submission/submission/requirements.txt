@@ -1,3 +1,6 @@
-langgraph
-openai
-pypdf
+langgraph==1.2.14
+openai==3.26.0
+pypdf==6.11.0
+torch==2.14.1
+transformers==5.19.0
+sentence-transformers==6.1.0

@@ -1,4 +1,6 @@
 from pathlib import Path
+import hashlib
+import json
 import threading
 import time
 
@@ -34,6 +36,93 @@ def test_manual_search_ranks_matching_command_first(monkeypatch) -> None:
 
     assert results[0].page == 1
     assert "set_scan_signal" in results[0].text
+
+
+def test_hybrid_search_finds_english_manual_passage_for_chinese_query():
+    class Embedder:
+        def embed_query(self, text, deadline_monotonic=None, clock=time.monotonic):
+            assert "中文扫描使能" in text
+            return (1.0, 0.0)
+
+    relevant = ManualChunk(1, 0, "Configure scan enable with set_scan_signal.")
+    irrelevant = ManualChunk(2, 0, "The scan chain report lists chain lengths.")
+    index = ManualIndex((relevant, irrelevant), ((1.0, 0.0), (0.0, 1.0)), Embedder())
+
+    assert index.search(["中文扫描使能"], limit=1) == [relevant]
+
+
+def test_hybrid_search_falls_back_to_keywords_when_query_embedding_fails():
+    class BrokenEmbedder:
+        def embed_query(self, *_args, **_kwargs):
+            raise RuntimeError("model execution failed")
+
+    exact = ManualChunk(1, 0, "set_scan_signal configuration")
+    other = ManualChunk(2, 0, "scan chain output")
+    index = ManualIndex((exact, other), ((1.0, 0.0), (0.0, 1.0)), BrokenEmbedder())
+
+    assert index.search(["set_scan_signal"], limit=1) == [exact]
+
+
+def test_manual_load_builds_semantic_vectors_when_embedder_is_available(monkeypatch):
+    class Reader:
+        def __init__(self, _path):
+            self.pages = [_Page("Configure scan enable with set_scan_signal.")]
+
+    class Embedder:
+        def embed_documents(self, texts, deadline_monotonic=None, clock=time.monotonic):
+            return ((1.0, 0.0) for _ in texts)
+
+        def embed_query(self, text, deadline_monotonic=None, clock=time.monotonic):
+            return (1.0, 0.0)
+
+    monkeypatch.setattr(manual, "PdfReader", Reader)
+    result = load_manual(Path("manual.pdf"), embedder=Embedder())
+
+    assert result.available is True
+    assert result.semantic_available is True
+    assert result.semantic_error is None
+    assert result.index is not None
+    assert result.index.embeddings == ((1.0, 0.0),)
+
+
+def test_manual_load_uses_cache_only_for_matching_pdf_and_chunks(monkeypatch, tmp_path):
+    class Reader:
+        def __init__(self, _path):
+            self.pages = [_Page("Configure scan enable with set_scan_signal.")]
+
+    class Embedder:
+        def __init__(self):
+            self.document_calls = 0
+
+        def embed_documents(self, texts, deadline_monotonic=None, clock=time.monotonic):
+            self.document_calls += 1
+            return ((0.0, 1.0) for _ in texts)
+
+        def embed_query(self, text, deadline_monotonic=None, clock=time.monotonic):
+            return (1.0, 0.0)
+
+    monkeypatch.setattr(manual, "PdfReader", Reader)
+    pdf_path = tmp_path / "manual.pdf"
+    pdf_path.write_bytes(b"stable manual")
+    cache_path = tmp_path / "manual-index.json"
+    cache_path.write_text(json.dumps({
+        "format_version": 1,
+        "model_revision": manual.QWEN_MODEL_REVISION,
+        "pdf_sha256": hashlib.sha256(pdf_path.read_bytes()).hexdigest(),
+        "chunk_keys": [[1, 0]],
+        "embeddings": [[1.0, 0.0]],
+    }), encoding="utf-8")
+    embedder = Embedder()
+
+    cached = load_manual(pdf_path, embedder=embedder, embedding_index_path=cache_path)
+    assert cached.semantic_available is True
+    assert cached.index is not None and cached.index.embeddings == ((1.0, 0.0),)
+    assert embedder.document_calls == 0
+
+    pdf_path.write_bytes(b"different manual")
+    rebuilt = load_manual(pdf_path, embedder=embedder, embedding_index_path=cache_path)
+    assert rebuilt.semantic_available is True
+    assert embedder.document_calls == 1
 
 
 def test_missing_manual_is_recorded_not_raised(tmp_path: Path) -> None:

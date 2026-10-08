@@ -6,10 +6,12 @@ import os
 from pathlib import Path
 import subprocess
 import time
-from typing import Mapping, Sequence
+from typing import Literal, Mapping, Sequence
 
 from .artifacts import RunPaths, write_json_atomic
 from .dofile import resolve_output_destinations
+
+LaunchMode = Literal["file_flag", "stdin_source"]
 
 
 @dataclass(frozen=True)
@@ -38,14 +40,25 @@ def run_scan_tool(
     executable: Sequence[str],
     timeout_seconds: float,
     env: Mapping[str, str],
+    launch_mode: LaunchMode = "file_flag",
 ) -> ToolResult:
     """Execute without a shell, merging child output directly into the run log."""
     if not executable or isinstance(executable, (str, bytes)):
         raise ValueError("executable must be a nonempty sequence of command arguments")
     if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
         raise ValueError("timeout_seconds must be finite and greater than zero")
-    resolve_output_destinations(dofile_path.read_text(encoding="utf-8"), paths.work)
-    command = [*executable, "-f", str(dofile_path.resolve())]
+    if launch_mode not in {"file_flag", "stdin_source"}:
+        raise ValueError("launch_mode must be 'file_flag' or 'stdin_source'")
+    destinations = resolve_output_destinations(dofile_path.read_text(encoding="utf-8"), paths.work)
+    for destination in destinations:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+    resolved_dofile = dofile_path.resolve()
+    try:
+        resolved_dofile.relative_to(paths.root.resolve())
+    except ValueError as error:
+        raise ValueError("dofile must be contained within its run directory") from error
+    command = [*executable, "-f", str(resolved_dofile)] if launch_mode == "file_flag" else list(executable)
+    stdin_text = f'Source "{resolved_dofile.as_posix()}"\nexit\n' if launch_mode == "stdin_source" else None
     merged_env = {**os.environ, **env}
     before = _inventory(paths.root)
     started = time.monotonic()
@@ -59,14 +72,18 @@ def run_scan_tool(
         try:
             process = subprocess.Popen(
                 command, cwd=paths.work, stdout=log_handle,
-                stderr=subprocess.STDOUT, text=True, env=merged_env,
+                stderr=subprocess.STDOUT, stdin=subprocess.PIPE if stdin_text is not None else None,
+                text=True, env=merged_env,
             )
         except OSError as error:
             failure_kind = "tool_unavailable"
             failure_detail = str(error)
         else:
             try:
-                process.communicate(timeout=timeout_seconds)
+                if stdin_text is None:
+                    process.communicate(timeout=timeout_seconds)
+                else:
+                    process.communicate(input=stdin_text, timeout=timeout_seconds)
             except subprocess.TimeoutExpired:
                 timed_out = True
                 failure_kind = "timeout"
@@ -93,6 +110,8 @@ def run_scan_tool(
     metadata = {
         "run_id": paths.run_id,
         "command": command,
+        "launch_mode": launch_mode,
+        "dofile_file": resolved_dofile.relative_to(paths.root.parent.parent.resolve()).as_posix(),
         "exit_code": result.exit_code,
         "timed_out": result.timed_out,
         "duration_seconds": result.duration_seconds,

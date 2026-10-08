@@ -79,7 +79,7 @@ _CHAIN_PATTERNS = (
     ("chain_length", re.compile(r"^\s*(?:scan\s+)?chain\s+(?P<chain_name>\S+)\s+length\s*[:=]\s*(?P<value>\d+)\b", re.IGNORECASE)),
 )
 _INSERTION_COMPLETE = re.compile(
-    r"^\s*(?:\[INFO\]\s*)?(?:insert_scan|scan\s+insertion)\s+"
+    r"^\s*(?:\[INFO\]\s*)?(?:insert_dft_logic|scan\s+insertion)\s+"
     r"(?:completed|succeeded)(?:\s+successfully)?\s*[.!]?\s*$",
     re.IGNORECASE,
 )

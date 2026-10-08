@@ -149,7 +149,7 @@ def test_generation_consumes_budget_before_any_tool_run(tmp_path):
 
 def test_task2_repairs_original_with_static_rejections(tmp_path):
     case = make_task1_case(tmp_path)
-    original = "# original\n" + SAFE_DOFILE.replace("insert_scan", "exec forbidden")
+    original = "# original\n" + SAFE_DOFILE.replace("insert_dft_logic", "exec forbidden")
     (case / "original.dofile").write_text(original, encoding="utf-8")
     output = tmp_path / "output"
     deps = fake_dependencies("success")
@@ -336,7 +336,7 @@ def test_expired_failure_audit_uses_one_minimal_atomic_fallback(tmp_path, monkey
 
 def test_task2_static_diagnostics_reach_repairer(tmp_path):
     case = make_task1_case(tmp_path)
-    original = "# original\n" + SAFE_DOFILE.replace("insert_scan", "exec forbidden")
+    original = "# original\n" + SAFE_DOFILE.replace("insert_dft_logic", "exec forbidden")
     (case / "original.dofile").write_text(original, encoding="utf-8")
     deps = fake_dependencies("success")
     repairer = deps.repairer

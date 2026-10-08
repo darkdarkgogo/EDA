@@ -28,17 +28,21 @@ def excluded(relative: str) -> bool:
 
 
 def test_dockerfile_uses_official_base_and_entrypoint() -> None:
-    assert (ROOT / "Dockerfile").read_text(encoding="utf-8") == (
-        "FROM scan-agent-base:ubuntu24\n"
-        "COPY submission/requirements.txt /tmp/requirements.txt\n"
-        "RUN pip3 install --no-cache-dir --break-system-packages \\\n"
-        "    -r /tmp/requirements.txt && rm /tmp/requirements.txt\n"
-        "RUN rm -rf /submission/*\n"
-        "COPY submission/ /submission/\n"
-        "RUN chmod +x /submission/agent_system\n"
-        "WORKDIR /work\n"
-        'ENTRYPOINT ["/submission/agent_system"]\n'
-    )
+    dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    for line in [
+        "FROM scan-agent-base:ubuntu24",
+        "ARG QWEN_MODEL_REVISION=97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3",
+        "SCAN_AGENT_EMBEDDING_MODEL_PATH=/opt/scan-agent/models/qwen3-embedding-0.6b",
+        "SCAN_AGENT_EMBEDDING_MODEL_REVISION=${QWEN_MODEL_REVISION}",
+        "https://download.pytorch.org/whl/cpu",
+        "import openai, langgraph, pypdf, torch, transformers, sentence_transformers",
+        "snapshot_download(repo_id='Qwen/Qwen3-Embedding-0.6B'",
+        "revision='${QWEN_MODEL_REVISION}'",
+        "RUN rm -rf /submission/*",
+        "COPY submission/ /submission/",
+        "ENTRYPOINT [\"/submission/agent_system\"]",
+    ]:
+        assert line in dockerfile
 
 
 @pytest.mark.parametrize("path", [
@@ -58,6 +62,16 @@ def test_runtime_files_are_copyable() -> None:
         if path.is_file() and path.suffix in {".py", ".txt"}:
             assert not excluded(path.relative_to(ROOT).as_posix())
     assert not excluded("submission/agent_system")
+
+
+def test_runtime_dependencies_are_exactly_pinned() -> None:
+    assert (ROOT / "submission/requirements.txt").read_text(encoding="utf-8").splitlines() == [
+        "langgraph==1.2.14", "openai==3.26.0", "pypdf==6.11.0",
+        "torch==2.14.1", "transformers==5.19.0", "sentence-transformers==6.1.0",
+    ]
+    assert (ROOT / "requirements-dev.txt").read_text(encoding="utf-8").splitlines() == [
+        "-r submission/requirements.txt", "pytest==9.1.1",
+    ]
 
 
 def test_submission_has_no_committed_or_copyable_caches_or_secrets() -> None:
@@ -93,4 +107,8 @@ def test_readme_documents_formal_local_and_failure_contract() -> None:
                      "unsupported_netlist_repair", "decision_log.json", "final_results",
                      "tool_failure", "budget_exhausted", "invalid_model_output",
                      "no_progress", "compliance_failure"]:
+        assert required in text
+    for required in ["DFTEXP_SCAN_LAUNCH_MODE", "file_flag", "stdin_source",
+                     "DFTEXP_REAL_SMOKE=1", "DFTEXP_SCAN_EXECUTABLE",
+                     "DFTEXP_SMOKE_INPUT", "DFTEXP_SMOKE_OUTPUT"]:
         assert required in text

@@ -22,11 +22,15 @@ This iteration covers:
 - report generation and deterministic validation for scan signals, scan
   configuration, chains, wrappers, partitions, DRC, and insertion completion;
 - exact runtime dependency versions;
-- offline contract tests plus an opt-in real-tool test entry point.
+- offline contract tests plus an opt-in real-tool test entry point;
+- local Qwen3 embeddings fused with keyword search for the command manual,
+  using an in-memory vector index and build-time cache when the official manual
+  is present in the base image.
 
-Deterministic netlist/Liberty structural summarization and improved manual
-retrieval are separate follow-up work. The manual PDFs are development inputs
-and are not copied into the submission image.
+Deterministic netlist/Liberty structural summarization remains follow-up work.
+The manual PDFs are not copied into the submission image. When the official
+base image contains the Scan User Manual, Docker computes and packages its Qwen
+vectors during image build; otherwise the runtime retains keyword-only search.
 
 ## Documented command flow
 
@@ -129,10 +133,12 @@ use `SCAN_AGENT_SKIP_READY_WAIT=1`.
 
 ## Dependency reproducibility
 
-`submission/requirements.txt` pins exact tested versions of `langgraph`,
-`openai`, and `pypdf`. The selected versions must install together in the
-official Python environment and pass the complete offline suite. Development
-dependencies are pinned separately.
+`submission/requirements.txt` pins exact versions of `langgraph`, `openai`,
+`pypdf`, `torch`, `transformers`, and `sentence-transformers`. Docker installs
+the CPU PyTorch wheel and downloads a revision-pinned Qwen3-Embedding-0.6B
+snapshot at build time. Runtime model loading is local-only. The selected
+versions must install together in the official Python environment and pass the
+complete offline suite. Development dependencies are pinned separately.
 
 ## Verification
 
@@ -159,6 +165,6 @@ represented by the fake tool.
 ## Follow-up work
 
 After this compatibility and validation layer is proven, a separate iteration
-will add deterministic netlist and Liberty summaries and a command-aware manual
-index. Those summaries will be bounded, input-protected, and passed to the LLM
-instead of raw large design files.
+may add deterministic netlist and Liberty summaries. Those summaries will be
+bounded, input-protected, and passed to the LLM instead of raw large design
+files.

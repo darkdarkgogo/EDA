@@ -201,6 +201,53 @@ def _json_value(value: object) -> bool:
     return isinstance(value, dict) and all(isinstance(key, str) and _json_value(item) for key, item in value.items())
 
 
+def _validate_typed_records(data: dict[str, object]) -> None:
+    schemas = {
+        "clocks": ({"port": str, "off_state": int}, {"internal_clocks": str}),
+        "resets": ({"port": str, "off_state": int}, {}),
+        "constants": ({"port": str, "constant_value": (str, int)}, {}),
+        "scan_enables": ({"port": str, "off_state": int}, {"view": str, "usage": str}),
+        "partitions": ({"name": str, "include": list, "exclude": list},
+                       {"clocks": list, "rising_edge_clocks": list, "falling_edge_clocks": list}),
+    }
+    for field_name, (required, optional) in schemas.items():
+        for index, record in enumerate(data[field_name]):
+            unknown = set(record) - set(required) - set(optional)
+            missing = set(required) - set(record)
+            if unknown or missing:
+                raise ValueError(f"{field_name}[{index}] keys missing={sorted(missing)}, unexpected={sorted(unknown)}")
+            for key, expected_type in {**required, **optional}.items():
+                if key not in record:
+                    continue
+                value = record[key]
+                valid_type = type(value) in expected_type if isinstance(expected_type, tuple) else type(value) is expected_type
+                if not valid_type:
+                    raise ValueError(f"{field_name}[{index}].{key} has an invalid type")
+                if key == "off_state" and value not in (0, 1):
+                    raise ValueError(f"{field_name}[{index}].off_state must be 0 or 1")
+                if isinstance(value, str) and not value.strip():
+                    raise ValueError(f"{field_name}[{index}].{key} must be nonempty")
+                if key in {"include", "exclude", "clocks", "rising_edge_clocks", "falling_edge_clocks"} and any(
+                    not isinstance(item, str) or not item.strip() for item in value
+                ):
+                    raise ValueError(f"{field_name}[{index}].{key} must contain nonempty strings")
+    lockup = data["lockup"]
+    lockup_keys = {"add_lockup", "insert_terminal_lockup"}
+    if lockup and set(lockup) != lockup_keys:
+        raise ValueError("lockup requires add_lockup and insert_terminal_lockup")
+    if set(lockup) - lockup_keys or any(type(value) is not bool for value in lockup.values()):
+        raise ValueError("lockup may contain only boolean add_lockup and insert_terminal_lockup")
+    wrapper = data["wrapper_settings"]
+    wrapper_types = {"chain_count": int, "chain_length": int, "style": str}
+    if wrapper and set(wrapper) != set(wrapper_types):
+        raise ValueError("wrapper_settings requires chain_count, chain_length, and style")
+    if set(wrapper) - set(wrapper_types):
+        raise ValueError("wrapper_settings contains unsupported keys")
+    for key, value in wrapper.items():
+        if type(value) is not wrapper_types[key] or (key != "style" and value < 1) or (key == "style" and not value.strip()):
+            raise ValueError(f"wrapper_settings.{key} has an invalid value")
+
+
 def _requirements(data: dict[str, object], inventory: InputInventory, wall_time: float, max_runs: int) -> Requirements:
     names = {field.name for field in fields(Requirements)}
     if set(data) != names:
@@ -231,6 +278,7 @@ def _requirements(data: dict[str, object], inventory: InputInventory, wall_time:
     for name in ("lockup", "wrapper_settings"):
         if not isinstance(data[name], dict) or not _json_value(data[name]):
             raise ValueError(f"{name} must be a JSON object")
+    _validate_typed_records(data)
     if data["edge_policy"] is not None and (not isinstance(data["edge_policy"], str) or not data["edge_policy"].strip()):
         raise ValueError("edge_policy must be null or a nonempty string")
     constraints = data["chain_constraints"]

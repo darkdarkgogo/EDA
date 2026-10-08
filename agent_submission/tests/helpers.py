@@ -13,9 +13,15 @@ from scan_agent.workflow import WorkflowDependencies
 SAFE_DOFILE = """load_lib /input/lib/stdcells.lib
 load_netlist /input/netlist/design.v
 present_design top
-examine_scan
-insert_scan
-dump_netlist -file post_scan.v
+set_scan_signal -type clock -port clk -off_state 0
+set_scan_signal -type scan_enable -port scan_en -off_state 0
+examine_scan_drc -verbose -file reports/drc.rpt
+examine_scan_chain
+insert_dft_logic
+rpt_scan_signal > reports/scan_signal.rpt
+rpt_scan_cfg > reports/scan_cfg.rpt
+rpt_scan_chain -class all > reports/scan_chain.rpt
+dump_netlist -file deliverables/post_scan.v
 exit
 """
 
@@ -81,18 +87,28 @@ def scripted_dependencies(tool_results: list[ToolResult], dofiles: list[str] | N
     def runner(paths, dofile_path, executable, timeout_seconds, env):
         template = next(results)
         if template.failure_kind == "nonzero_exit":
-            log = f"[ERROR] [{template.failure_detail}] insert_scan failed\n"
+            log = f"[ERROR] [{template.failure_detail}] insert_dft_logic failed\n"
         elif template.failure_detail and template.failure_detail.startswith("DFTR"):
             log = f"{template.failure_detail} x1\nTotal violations: 1\n"
         elif template.success:
-            log = "[INFO] insert_scan completed successfully\nTotal violations: 0\n"
+            log = "[INFO] insert_dft_logic completed successfully\nTotal violations: 0\n"
             (paths.deliverables / "post_scan.v").write_text("module top(); endmodule\n", encoding="utf-8")
-            (paths.reports / "scan.rpt").write_text(
-                "Number of scan chains: 1\nMaximum chain length: 1\n",
-                encoding="utf-8",
-            )
+            (paths.reports / "drc.rpt").write_text("Total violations: 0\n", encoding="utf-8")
+            (paths.reports / "scan_signal.rpt").write_text("""Port PortProperty SignalType OffState HookupPin HookupSense AssociatedInternal Usage View ConstantValue OwnerPartition
+clk user_defined clock 0 - - - - - - Default_Partition
+scan_en user_defined scan_enable 0 - - - all spec - Default_Partition
+""", encoding="utf-8")
+            (paths.reports / "scan_cfg.rpt").write_text("""ScanConfigurationParameter Value
+chain_count 1
+max_length 1
+add_lockup True
+insert_terminal_lockup False
+""", encoding="utf-8")
+            (paths.reports / "scan_chain.rpt").write_text("""Chain Length Input Output ScanEnable Clocks Partition ChainProperty
+I 0 1 test_si0 test_so0 scan_en clk Default_Partition tool_created
+""", encoding="utf-8")
         elif template.timed_out:
-            log = "[INFO] insert_scan started\n"
+            log = "[INFO] insert_dft_logic started\n"
         else:
             log = ""
         paths.log.write_text(log, encoding="utf-8")

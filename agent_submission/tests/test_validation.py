@@ -13,11 +13,25 @@ from scan_agent.validation import validate_run
 def _case(tmp_path, log="Total violations: 0\n", *, insertion=True, structure=True, **overrides):
     paths = create_run(tmp_path / "output", 1)
     if insertion:
-        log = "[INFO] insert_scan completed successfully\n" + log
+        log = "[INFO] insert_dft_logic completed successfully\n" + log
     paths.log.write_text(log, encoding="utf-8")
+    (paths.reports / "drc.rpt").write_text("Total violations: 0\n", encoding="utf-8")
     (paths.deliverables / "post_scan.v").write_text("module top(); endmodule\n", encoding="utf-8")
-    if structure and not overrides.get("chain_constraints"):
-        (paths.reports / "scan.rpt").write_text("Number of scan chains: 1\nMaximum chain length: 1\n", encoding="utf-8")
+    constraints = overrides.get("chain_constraints", {})
+    count = constraints.get("chain_count", constraints.get("min_chain_count", 1)) if isinstance(constraints, dict) else 1
+    length = constraints.get("max_length", 1) if isinstance(constraints, dict) else 1
+    if structure:
+        (paths.reports / "scan_signal.rpt").write_text("""Port PortProperty SignalType OffState HookupPin HookupSense AssociatedInternal Usage View ConstantValue OwnerPartition
+clk user_defined clock 0 - - - - - - Default_Partition
+scan_en user_defined scan_enable 0 - - - all spec - Default_Partition
+""", encoding="utf-8")
+        (paths.reports / "scan_cfg.rpt").write_text(
+            f"ScanConfigurationParameter Value\nchain_count {count}\nmax_length {length}\nadd_lockup True\ninsert_terminal_lockup False\n",
+            encoding="utf-8",
+        )
+        chain_lines = ["Chain Length Input Output ScanEnable Clocks Partition ChainProperty"]
+        chain_lines.extend(f"I {index} 1 si{index} so{index} scan_en clk Default_Partition tool_created" for index in range(count))
+        (paths.reports / "scan_chain.rpt").write_text("\n".join(chain_lines) + "\n", encoding="utf-8")
     input_dir = tmp_path / "input"
     input_dir.mkdir()
     (input_dir / "pre_scan.v").write_text("module top(); endmodule\n", encoding="utf-8")
@@ -33,6 +47,14 @@ def test_real_complete_evidence_passes(tmp_path):
     assert report.input_integrity is True
     assert report.evidence[0].source.endswith("R1.log")
     assert any(item.source_line == "Total violations: 0" for item in report.evidence)
+
+
+def test_oversized_required_config_line_fails_even_without_config_requirements(tmp_path):
+    requirements, result, diagnostics, paths = _case(tmp_path)
+    (paths.reports / "scan_cfg.rpt").write_text("x" * 1_048_577, encoding="utf-8")
+    report = validate_run(requirements, result, diagnostics, paths)
+    assert not report.passed
+    assert any("exceeds 1048576 characters" in item for item in report.failures)
 
 
 @pytest.mark.parametrize("insertion,structure,missing", [
@@ -91,7 +113,10 @@ def test_parent_rule_permission_applies_to_subrule_but_not_other_family(tmp_path
     "DFTR-TIE0 x1\nTotal violations: 0\n",
 ])
 def test_missing_unknown_or_inconsistent_drc_fails(tmp_path, log):
-    assert not validate_run(*_case(tmp_path, log, allowed_drc=["DFTR-TIE0"])).passed
+    case = _case(tmp_path, log, allowed_drc=["DFTR-TIE0"])
+    if log == "[INFO] finished\n":
+        case[3].reports.joinpath("drc.rpt").unlink()
+    assert not validate_run(*case).passed
 
 
 def test_counted_rules_without_total_are_explicit_evidence(tmp_path):
@@ -132,26 +157,157 @@ def test_report_error_and_report_drc_are_checked(tmp_path):
 
 
 @pytest.mark.parametrize("report_text,passed", [
-    ("Number of scan chains: 4\nMaximum chain length: 90\n", True),
-    ("Number of scan chains: 2\nMaximum chain length: 90\n", False),
-    ("Number of scan chains: 4\nMaximum chain length: 101\n", False),
+    ("Chain Length Input Output ScanEnable Clocks Partition ChainProperty\n" + "\n".join(f"I {i} 90 si so se clk Default_Partition tool_created" for i in range(4)), True),
+    ("Chain Length Input Output ScanEnable Clocks Partition ChainProperty\n" + "\n".join(f"I {i} 90 si so se clk Default_Partition tool_created" for i in range(2)), False),
+    ("Chain Length Input Output ScanEnable Clocks Partition ChainProperty\n" + "\n".join(f"I {i} 101 si so se clk Default_Partition tool_created" for i in range(4)), False),
     ("unrecognized report\n", False),
 ])
 def test_chain_constraints_require_report_facts(tmp_path, report_text, passed):
     requirements, result, diagnostics, paths = _case(tmp_path, chain_constraints={"chain_count": 4, "max_length": 100})
-    (paths.reports / "chain.rpt").write_text(report_text, encoding="utf-8")
+    (paths.reports / "scan_chain.rpt").write_text(report_text, encoding="utf-8")
     assert validate_run(requirements, result, diagnostics, paths).passed is passed
 
 
 def test_chain_counts_in_log_cannot_replace_missing_report(tmp_path):
     case = _case(tmp_path, "Total violations: 0\nNumber of scan chains: 4\n", chain_constraints={"chain_count": 4})
+    case[3].reports.joinpath("scan_chain.rpt").unlink()
     assert not validate_run(*case).passed
 
 
 def test_max_chain_count_accepts_bounds_and_lengths_check_every_chain(tmp_path):
     requirements, result, diagnostics, paths = _case(tmp_path, chain_constraints={"max_chain_count": 5, "max_length": 100})
-    (paths.reports / "chain.rpt").write_text("Number of scan chains: 4\nChain scan_1 length: 90\nChain scan_2 length: 101\n", encoding="utf-8")
+    (paths.reports / "scan_chain.rpt").write_text("Chain Length Input Output ScanEnable Clocks Partition ChainProperty\nI a 90 si so se clk Default_Partition tool_created\nI b 101 si so se clk Default_Partition tool_created\n", encoding="utf-8")
     assert not validate_run(requirements, result, diagnostics, paths).passed
+
+
+@pytest.mark.parametrize("field,requirements,expected_status", [
+    ("clocks", [{"port": "clk", "off_state": 0}], "pass"),
+    ("clocks", [{"port": "clk", "off_state": 1}], "fail"),
+    ("clocks", [{"port": "missing_clk", "off_state": 0}], "unverified"),
+    ("scan_enables", [{"port": "scan_en", "off_state": 0, "view": "spec", "usage": "all"}], "pass"),
+    ("scan_enables", [{"port": "scan_en", "off_state": 1, "view": "spec", "usage": "all"}], "fail"),
+])
+def test_signal_requirement_checks_are_evidence_backed(tmp_path, field, requirements, expected_status):
+    case = _case(tmp_path, **{field: requirements})
+    report = validate_run(*case)
+    check = next(item for item in report.requirement_checks if item.field.startswith(field + "["))
+    assert check.status == expected_status
+    if expected_status == "pass":
+        assert check.evidence and check.evidence[0]["path"].endswith("scan_signal.rpt")
+    else:
+        assert not report.passed
+
+
+def test_duplicate_signal_rows_fail_closed(tmp_path):
+    requirements, result, diagnostics, paths = _case(tmp_path, clocks=[{"port": "clk", "off_state": 0}])
+    signal = paths.reports / "scan_signal.rpt"
+    signal.write_text(signal.read_text(encoding="utf-8") + "clk user_defined clock 0 - - - - - - Default_Partition\n", encoding="utf-8")
+    report = validate_run(requirements, result, diagnostics, paths)
+    check = next(item for item in report.requirement_checks if item.field.startswith("clocks["))
+    assert check.status == "fail"
+
+
+@pytest.mark.parametrize("internal_clock,status", [("clk_int", "pass"), ("other_clk", "fail")])
+def test_clock_internal_clock_mapping_is_checked(tmp_path, internal_clock, status):
+    requirements, result, diagnostics, paths = _case(
+        tmp_path, clocks=[{"port": "clk", "off_state": 0, "internal_clocks": internal_clock}],
+    )
+    signal = paths.reports / "scan_signal.rpt"
+    signal.write_text(signal.read_text(encoding="utf-8").replace(
+        "clk user_defined clock 0 - - - - - - Default_Partition",
+        "clk user_defined clock 0 - - clk_int - - - Default_Partition",
+    ), encoding="utf-8")
+    report = validate_run(requirements, result, diagnostics, paths)
+    check = next(item for item in report.requirement_checks if item.field.startswith("clocks["))
+    assert check.status == status
+
+
+@pytest.mark.parametrize("value,status", [(0, "pass"), (1, "fail")])
+def test_constant_and_lockup_requirements_use_report_fields(tmp_path, value, status):
+    requirements, result, diagnostics, paths = _case(
+        tmp_path, constants=[{"port": "test_mode", "constant_value": value}],
+        lockup={"add_lockup": True, "insert_terminal_lockup": False},
+    )
+    signals = paths.reports / "scan_signal.rpt"
+    signals.write_text(signals.read_text(encoding="utf-8").replace(
+        "scan_en user_defined scan_enable 0 - - - all spec - Default_Partition",
+        "scan_en user_defined scan_enable 0 - - - all spec - Default_Partition\ntest_mode user_defined constant 0 - - - - - 0 Default_Partition",
+    ), encoding="utf-8")
+    report = validate_run(requirements, result, diagnostics, paths)
+    constant = next(item for item in report.requirement_checks if item.field.startswith("constants["))
+    lockup = [item for item in report.requirement_checks if item.field.startswith("lockup.")]
+    assert constant.status == status
+    assert all(item.status == "pass" for item in lockup)
+
+
+def test_partition_membership_uses_report_rows(tmp_path):
+    requirements, result, diagnostics, paths = _case(
+        tmp_path, partitions=[{"name": "core", "include": ["u0", "u1"], "exclude": ["u2"]}],
+    )
+    (paths.reports / "scan_partition.rpt").write_text(
+        "Partition Include Exclude Clocks RisingEdgeClocks FallingEdgeClocks\ncore u0,u1 u2 clk0 clk0 -\n",
+        encoding="utf-8",
+    )
+    report = validate_run(requirements, result, diagnostics, paths)
+    assert next(item for item in report.requirement_checks if item.field.startswith("partitions[" )).status == "pass"
+
+
+def test_partition_member_rows_still_check_requested_clock_fields(tmp_path):
+    case = _case(tmp_path, partitions=[{"name": "core", "include": ["u0"], "exclude": [],
+                                       "clocks": ["clk0"]}])
+    case[3].reports.joinpath("scan_partition.rpt").write_text(
+        "Partition Cell Include Exclude Clocks RisingEdgeClocks FallingEdgeClocks\ncore u0 - - wrong_clk - -\ncore u1 - - wrong_clk - -\n",
+        encoding="utf-8",
+    )
+    report = validate_run(*case)
+    check = next(item for item in report.requirement_checks if item.field.startswith("partitions["))
+    assert check.status == "fail"
+    assert len(check.evidence) == 2
+
+
+@pytest.mark.parametrize("field,value", [
+    ("clock_domains", [{"name": "core", "clocks": ["clk"]}]),
+    ("scan_segments", [{"name": "core", "include": ["u0"]}]),
+    ("edge_policy", "falling"),
+])
+def test_unmapped_requirement_families_fail_closed(tmp_path, field, value):
+    report = validate_run(*_case(tmp_path, **{field: value}))
+    assert not report.passed
+    check = next(item for item in report.requirement_checks if item.field == field)
+    assert check.status == "unverified"
+
+
+@pytest.mark.parametrize("field,requested,chain_row,status", [
+    ("clocks", [{"port": "clk", "off_state": 0}], "clk", "pass"),
+    ("clocks", [{"port": "other_clk", "off_state": 0}], "clk", "fail"),
+    ("scan_enables", [{"port": "scan_en", "off_state": 0}], "scan_en", "pass"),
+    ("scan_enables", [{"port": "other_en", "off_state": 0}], "scan_en", "fail"),
+])
+def test_chain_wiring_is_checked_against_requested_clock_and_enable(tmp_path, field, requested, chain_row, status):
+    case = _case(tmp_path, **{field: requested})
+    path = case[3].reports / "scan_chain.rpt"
+    path.write_text(f"Chain Length Input Output ScanEnable Clocks Partition ChainProperty\nI a 1 si so scan_en {chain_row} Default_Partition tool_created\n",
+                    encoding="utf-8")
+    report = validate_run(*case)
+    check = next(item for item in report.requirement_checks if item.field == field + ".chain_wiring")
+    assert check.status == status
+
+
+def test_wrapper_configuration_and_chain_rows_are_both_required(tmp_path):
+    requirements, result, diagnostics, paths = _case(
+        tmp_path, wrapper_settings={"chain_count": 1, "chain_length": 16, "style": "dedicated"},
+    )
+    (paths.reports / "wrapper_cfg.rpt").write_text(
+        "WrapperConfigurationParameter Value\nchain_count 1\nmax_length 16\nstyle dedicated\n",
+        encoding="utf-8",
+    )
+    (paths.reports / "scan_chain.rpt").write_text(
+        "Chain Length Input Output ScanEnable Clocks Partition ChainProperty\nW wrp0 8 wsi wso wrp_shift wrp_clk Default_Partition tool_created\n",
+        encoding="utf-8",
+    )
+    report = validate_run(requirements, result, diagnostics, paths)
+    assert report.passed
+    assert all(item.status == "pass" for item in report.requirement_checks)
 
 
 def test_input_hash_mutation_fails(tmp_path):
@@ -205,13 +361,15 @@ def test_individual_drc_records_and_summary_are_not_double_counted(tmp_path):
 
 def test_partial_chain_lengths_do_not_prove_maximum(tmp_path):
     requirements, result, diagnostics, paths = _case(tmp_path, chain_constraints={"max_length": 100})
-    (paths.reports / "chain.rpt").write_text("Number of scan chains: 4\nChain scan_1 length: 90\n", encoding="utf-8")
+    (paths.reports / "scan_cfg.rpt").write_text("ScanConfigurationParameter Value\nchain_count 4\nmax_length 100\n", encoding="utf-8")
+    (paths.reports / "scan_chain.rpt").write_text("Chain Length Input Output ScanEnable Clocks Partition ChainProperty\nI scan_1 90 si1 so1 se clk Default_Partition tool_created\n", encoding="utf-8")
     assert not validate_run(requirements, result, diagnostics, paths).passed
 
 
 def test_all_chain_lengths_with_count_can_prove_maximum(tmp_path):
     requirements, result, diagnostics, paths = _case(tmp_path, chain_constraints={"max_length": 100})
-    (paths.reports / "chain.rpt").write_text("Number of scan chains: 2\nChain scan_1 length: 90\nChain scan_2 length: 99\n", encoding="utf-8")
+    (paths.reports / "scan_cfg.rpt").write_text("ScanConfigurationParameter Value\nchain_count 2\nmax_length 100\n", encoding="utf-8")
+    (paths.reports / "scan_chain.rpt").write_text("Chain Length Input Output ScanEnable Clocks Partition ChainProperty\nI scan_1 90 si1 so1 se clk Default_Partition tool_created\nI scan_2 99 si2 so2 se clk Default_Partition tool_created\n", encoding="utf-8")
     assert validate_run(requirements, result, diagnostics, paths).passed
 
 
@@ -227,23 +385,25 @@ def test_required_drc_report_requires_drc_evidence(tmp_path):
 
 def test_duplicate_chain_names_cannot_prove_complete_lengths(tmp_path):
     requirements, result, diagnostics, paths = _case(tmp_path, chain_constraints={"max_length": 100})
-    (paths.reports / "chain.rpt").write_text("Number of scan chains: 2\nChain scan_1 length: 90\nChain scan_1 length: 90\n", encoding="utf-8")
+    (paths.reports / "scan_cfg.rpt").write_text("ScanConfigurationParameter Value\nchain_count 2\nmax_length 100\n", encoding="utf-8")
+    (paths.reports / "scan_chain.rpt").write_text("Chain Length Input Output ScanEnable Clocks Partition ChainProperty\nI scan_1 90 si1 so1 se clk Default_Partition tool_created\nI scan_1 90 si2 so2 se clk Default_Partition tool_created\n", encoding="utf-8")
     report = validate_run(requirements, result, diagnostics, paths)
     assert not report.passed
     assert "complete_chain_lengths" in report.missing_evidence
 
 
-@pytest.mark.parametrize("second_chain", ["scan_1", "scan_2"])
-def test_cross_file_partial_chain_rows_cannot_prove_coverage(tmp_path, second_chain):
+@pytest.mark.parametrize("second_chain,passed", [("scan_1", False), ("scan_2", True)])
+def test_full_chain_table_requires_unique_names(tmp_path, second_chain, passed):
     requirements, result, diagnostics, paths = _case(tmp_path, chain_constraints={"max_length": 100})
-    (paths.reports / "chain_a.rpt").write_text("Number of scan chains: 2\nChain scan_1 length: 90\n", encoding="utf-8")
-    (paths.reports / "chain_b.rpt").write_text(f"Number of scan chains: 2\nChain {second_chain} length: 90\n", encoding="utf-8")
-    assert not validate_run(requirements, result, diagnostics, paths).passed
+    (paths.reports / "scan_cfg.rpt").write_text("ScanConfigurationParameter Value\nchain_count 2\nmax_length 100\n", encoding="utf-8")
+    (paths.reports / "scan_chain.rpt").write_text(f"Chain Length Input Output ScanEnable Clocks Partition ChainProperty\nI scan_1 90 si1 so1 se clk Default_Partition tool_created\nI {second_chain} 90 si2 so2 se clk Default_Partition tool_created\n", encoding="utf-8")
+    assert validate_run(requirements, result, diagnostics, paths).passed is passed
 
 
 def test_partial_chain_rows_across_snapshots_cannot_prove_coverage(tmp_path):
     requirements, result, diagnostics, paths = _case(tmp_path, chain_constraints={"max_length": 100})
-    (paths.reports / "chain.rpt").write_text("Number of scan chains: 2\nChain scan_1 length: 90\nNumber of scan chains: 2\nChain scan_2 length: 90\n", encoding="utf-8")
+    (paths.reports / "scan_cfg.rpt").write_text("ScanConfigurationParameter Value\nchain_count 2\nmax_length 100\n", encoding="utf-8")
+    (paths.reports / "scan_chain.rpt").write_text("Chain Length Input Output ScanEnable Clocks Partition ChainProperty\nI scan_1 90 si1 so1 se clk Default_Partition tool_created\n", encoding="utf-8")
     assert not validate_run(requirements, result, diagnostics, paths).passed
 
 

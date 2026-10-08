@@ -10,12 +10,24 @@ from scan_agent.runner import run_scan_tool
 
 
 FAKE_TOOL = Path(__file__).with_name("fake_dftexp_scan.py")
+RUNNER_DOFILE = """load_lib /input/lib/stdcells.lib
+load_netlist /input/netlist/design.v
+present_design top
+examine_scan_drc -verbose -file reports/drc.rpt
+examine_scan_chain
+insert_dft_logic
+rpt_scan_signal > reports/scan_signal.rpt
+rpt_scan_cfg > reports/scan_cfg.rpt
+rpt_scan_chain -class all > reports/scan_chain.rpt
+dump_netlist -file deliverables/post_scan.v
+exit
+"""
 
 
-def _run(tmp_path, mode, timeout=5.0, env=None):
+def _run(tmp_path, mode, timeout=5.0, env=None, launch_mode="file_flag"):
     paths = create_run(tmp_path, 1)
-    dofile = write_run_dofile(paths, "exit\n")
-    result = run_scan_tool(paths, dofile, [sys.executable, str(FAKE_TOOL), "--mode", mode], timeout, env or {})
+    dofile = write_run_dofile(paths, RUNNER_DOFILE)
+    result = run_scan_tool(paths, dofile, [sys.executable, str(FAKE_TOOL), "--mode", mode], timeout, env or {}, launch_mode=launch_mode)
     return paths, result
 
 
@@ -29,8 +41,8 @@ def test_runner_success_and_created_manifest(tmp_path, monkeypatch):
     assert result.failure_kind is None
     assert result.duration_seconds >= 0
     assert result.log_path == paths.log
-    assert "deliverables/post_scan.v" in result.produced_files
-    assert "reports/scan.rpt" in result.produced_files
+    assert "work/deliverables/post_scan.v" in result.produced_files
+    assert "work/reports/scan_signal.rpt" in result.produced_files
     assert "deliverables/R1.dofile" not in result.produced_files
     assert (paths.work / "cwd.txt").read_text(encoding="utf-8") == str(paths.work.resolve())
     assert (paths.work / "environment.txt").read_text(encoding="utf-8") == "parent/child"
@@ -39,6 +51,19 @@ def test_runner_success_and_created_manifest(tmp_path, monkeypatch):
     assert metadata["success"] is True
     assert metadata["produced_files"] == list(result.produced_files)
     assert metadata["command"][-2:] == ["-f", str(paths.dofile.resolve())]
+    assert metadata["launch_mode"] == "file_flag"
+
+
+@pytest.mark.parametrize("launch_mode", ["file_flag", "stdin_source"])
+def test_runner_records_and_executes_launch_mode(tmp_path, launch_mode):
+    paths, result = _run(tmp_path, "success", launch_mode=launch_mode)
+    metadata = json.loads((paths.root / "run_metadata.json").read_text(encoding="utf-8"))
+    assert result.exit_code == 0
+    assert metadata["launch_mode"] == launch_mode
+    assert metadata["dofile_file"] == "runs/R1/deliverables/R1.dofile"
+    if launch_mode == "stdin_source":
+        assert metadata["command"] == [sys.executable, str(FAKE_TOOL), "--mode", "success"]
+        assert (paths.work / "stdin.txt").read_text(encoding="utf-8") == f'Source "{paths.dofile.resolve().as_posix()}"\nexit\n'
 
 
 def test_runner_preserves_nonzero_exit_and_log(tmp_path):
@@ -89,6 +114,14 @@ def test_runner_requires_executable(tmp_path):
     paths = create_run(tmp_path, 1)
     with pytest.raises(ValueError, match="executable"):
         run_scan_tool(paths, write_run_dofile(paths, "exit"), [], 5, {})
+
+
+def test_runner_rejects_unknown_launch_mode_before_process_creation(tmp_path, monkeypatch):
+    paths = create_run(tmp_path, 1)
+    dofile = write_run_dofile(paths, "exit")
+    monkeypatch.setattr(runner.subprocess, "Popen", lambda *args, **kwargs: pytest.fail("must not spawn"))
+    with pytest.raises(ValueError, match="launch_mode"):
+        run_scan_tool(paths, dofile, [sys.executable], 5, {}, launch_mode="invalid")
 
 
 def test_runner_uses_shared_atomic_metadata_writer(tmp_path, monkeypatch):

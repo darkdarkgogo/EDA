@@ -326,20 +326,30 @@ def build_requirement_mapping(
     deadline_monotonic: float | None = None,
     clock: Callable[[], float] = time.monotonic,
 ) -> list[dict]:
-    """Retain every typed declaration without claiming unsupported field checks.
-
-    Declaration values are JSON text: input names and arbitrary requirement
-    objects are data, not references into the output evidence directory.
-    """
-    machine_fields = {"required_outputs", "allowed_drc", "chain_constraints"}
+    """Map typed requirements to their latest deterministic report checks."""
+    checks = validations[-1].get("requirement_checks", []) if validations else []
     records = []
     for name, value in requirements.items():
         check_deadline(deadline_monotonic, clock, "requirement audit")
-        records.append({"field": name, "value_json": json.dumps(value, ensure_ascii=False, allow_nan=False),
+        matched = [item for item in checks if isinstance(item, Mapping) and
+                   (item.get("field") == name or str(item.get("field", "")).startswith(name + "[")
+                    or str(item.get("field", "")).startswith(name + "."))]
+        if matched:
+            statuses = {item.get("status") for item in matched}
+            status = "fail" if "fail" in statuses else "unverified" if "unverified" in statuses else "pass"
+            observed = [item.get("observed_json") for item in matched]
+            reason = "; ".join(str(item.get("reason", "")) for item in matched if item.get("reason"))
+            evidence = [ref for item in matched for ref in item.get("evidence", []) if isinstance(ref, Mapping)]
+        elif value in ([], {}):
+            status, observed, reason, evidence = "pass", value, "no requirement declared", []
+        else:
+            status, observed, reason, evidence = "unverified", None, "no deterministic checker is available for this requirement", []
+        records.append({"field": name, "requirement_type": name,
+                        "requested_json": json.dumps(value, ensure_ascii=False, allow_nan=False),
+                        "observed_json": json.dumps(observed, ensure_ascii=False, allow_nan=False),
+                        "status": status, "reason": reason,
                         "requirement": {"source": "requirements.json", "locator": name},
-                        "configuration": configurations,
-                        "verification_scope": "deterministic_run_checks" if name in machine_fields else "declaration_and_candidate_only",
-                        "validation": validations if name in machine_fields else []})
+                        "configuration": configurations, "evidence": evidence})
     return records
 
 
@@ -373,11 +383,13 @@ def build_tool_runs(
             # document must not prevent publishing a closed failure audit.
             entry["metadata_error"] = type(error).__name__
             metadata = {}
-        for name in ("exit_code", "timed_out", "duration_seconds", "success", "failure_kind", "failure_detail"):
+        for name in ("exit_code", "timed_out", "duration_seconds", "success", "failure_kind", "failure_detail",
+                     "command", "launch_mode", "dofile_file"):
             if name in metadata:
                 value = metadata[name]
                 types = {"exit_code": (int,), "timed_out": (bool,), "duration_seconds": (int, float),
-                         "success": (bool,), "failure_kind": (str,), "failure_detail": (str,)}
+                         "success": (bool,), "failure_kind": (str,), "failure_detail": (str,),
+                         "command": (list,), "launch_mode": (str,), "dofile_file": (str,)}
                 if value is None or type(value) in types[name]:
                     entry[name] = value
                 else:
