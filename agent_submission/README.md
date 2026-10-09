@@ -1,11 +1,13 @@
 # Scan Insertion Agent — phase one
 
 Python 3.12 on the official `scan-agent-base:ubuntu24` image runs a LangGraph
-workflow with `openai`, `langgraph`, `pypdf`, and a local Qwen3 embedding model. Use the evaluation-provided
-DeepSeek V4 Pro endpoint and model. Task one generates a dofile; task two repairs
-`original.dofile`. Python validates real `dftexp_scan` results before declaring
-success. Phase one returns `unsupported_netlist_repair` when a diagnosis requires
-Pre-scan netlist changes rather than editing a netlist. It does not run LEC.
+workflow with `openai`, `langgraph`, and `pypdf`. It retrieves relevant passages
+from the Scan User Manual with deterministic keyword ranking and supplies them
+to the evaluation-provided DeepSeek V4 Pro model. Task one generates a dofile;
+task two repairs `original.dofile`. Python validates real `dftexp_scan` results
+before declaring success. Phase one returns `unsupported_netlist_repair` when a
+diagnosis requires Pre-scan netlist changes rather than editing a netlist. It
+does not run LEC.
 
 ## Build
 
@@ -15,16 +17,12 @@ Run from `agent_submission/`, the build-context root containing `Dockerfile` and
 ```bash
 docker image inspect scan-agent-base:ubuntu24
 docker build -t scan-agent:phase1 .
-docker run --rm --entrypoint python3 scan-agent:phase1 -B -c 'import openai, langgraph, pypdf, torch, transformers, sentence_transformers'
+docker run --rm --entrypoint python3 scan-agent:phase1 -B -c 'import openai, langgraph, pypdf'
 ```
 
-The build needs internet access to install pinned CPU inference packages and
-download the pinned `Qwen/Qwen3-Embedding-0.6B` revision. The model weights
-and, when the base image contains the Scan User Manual, its precomputed manual
-vectors are baked into the image. Runtime embedding is offline and uses CPU;
-there is no embedding API key or separate vector database. The LLM still uses
-the evaluation-provided OpenAI-compatible API. The image is several gigabytes,
-so allow time and storage for the build and upload.
+The build installs the pinned runtime packages from the Tsinghua PyPI mirror at
+`https://pypi.tuna.tsinghua.edu.cn/simple`. It does not download a local
+embedding model. The LLM uses the evaluation-provided OpenAI-compatible API.
 
 To transfer the complete image to a server without pulling from a registry:
 
@@ -34,22 +32,25 @@ scp scan-agent-phase1.tar USER@SERVER:/path/to/upload/
 ssh USER@SERVER 'docker load -i /path/to/upload/scan-agent-phase1.tar'
 ```
 
-The transferred image already contains the embedding model and manual cache;
-the server does not need Hugging Face access. It still needs network access to
+The server does not need Hugging Face access. It still needs network access to
 the configured LLM endpoint and the DFTEXP license server.
 
 The image entrypoint is `/submission/agent_system`; it forwards CLI arguments
 and runs Python with bytecode writes disabled. Only `submission/` is copied into
-the image. Tests, docs, caches, `.env` files, public cases, and archives are
-excluded from the build context. Never put credentials into the runtime source.
+the image. The build context allowlist contains `submission/`, `.env`,
+`Dockerfile`, `README.md`, and `submission.zip`; tests, docs, caches, and public
+cases are excluded. `.env` is sent to the Docker builder but is not copied into
+the image. Never put credentials under `submission/`.
 
 ## Formal evaluation
 
-Export `LLM_API_KEY` (secret API key), `LLM_BASE_URL` (OpenAI-compatible endpoint),
-`LLM_MODEL` (evaluation-provided DeepSeek V4 Pro identifier), and
-`SCANINSERTION_LICENSE_SERVER` (license server required by `dftexp_scan`) in the
-host shell before running. The model settings are required; the license variable
-is inherited by the real scan process. No credentials are embedded in the image.
+Set `LLM_API_KEY` (your secret API key) before running. `LLM_BASE_URL` and
+`LLM_MODEL` default to the evaluation endpoint and `deepseek-v4-pro`; set them
+only when you need to override those defaults. The evaluation system supplies
+`SCANINSERTION_LICENSE_SERVER` to the real scan process. No credentials are
+embedded in the image. Python does not load `.env` automatically, so pass a
+local `.env` with Docker's `--env-file` option or export variables in the host
+shell.
 
 ```bash
 docker run --rm \
@@ -68,22 +69,29 @@ the case budget starts after this sentinel appears. Leave
 `SCAN_AGENT_SKIP_READY_WAIT` unset in formal mode. `limitations.md` supplies the
 wall-time budget and any tool-run limit; the default maximum is three tool runs,
 with ten seconds reserved for finalization. The tool manual is read from
-`/opt/dftexp_scan/doc/Scan_User_Manual.pdf`. Retrieval combines exact keyword
-ranking with Qwen semantic vectors held in memory. Docker builds create the
-vector cache from the manual already present in the official base image; the
-PDF is not copied into the submission image. If the model or matching cache is
-unavailable, the agent records that state and retains keyword-only retrieval.
+`/opt/dftexp_scan/doc/Scan_User_Manual.pdf`. Retrieval removes repeated page
+headers, splits the manual on Chinese and numbered section headings, and keeps
+each heading with its passage across page boundaries. A local BM25F index
+weights headings and body text separately, matches complete command identifiers,
+and selects passages across setup, signals, configuration, DRC, insertion, and
+output needs. Required CTL, Wrapper, Partition, Segment, Lockup, DRC-rule, and
+additional output topics receive their own retrieval slot, up to fourteen passages
+when the task needs them. When more topics are supplied, the six core phases and
+required output commands take priority over extra DRC rule passages. The PDF is not
+copied into the submission image. Decision logs
+record the retrieval method as `keyword_only`.
 
 ## Local pre-populated case
 
-For an already complete input directory, explicitly skip the readiness wait:
+Fill `LLM_API_KEY` in `.env` first. For a local run that invokes the licensed
+EDA tool, also uncomment `SCANINSERTION_LICENSE_SERVER` there and set a valid
+license server address. Run from `agent_submission/`; Docker then loads those
+values into the container with `--env-file`. For an already complete input
+directory, explicitly skip the readiness wait:
 
 ```bash
 docker run --rm \
-  -e LLM_API_KEY \
-  -e LLM_BASE_URL \
-  -e LLM_MODEL \
-  -e SCANINSERTION_LICENSE_SERVER \
+  --env-file .env \
   -e SCAN_AGENT_SKIP_READY_WAIT=1 \
   -v /absolute/case/input:/input:ro \
   -v /absolute/case/output:/output:rw \

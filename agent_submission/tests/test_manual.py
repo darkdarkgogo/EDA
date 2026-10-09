@@ -1,6 +1,4 @@
 from pathlib import Path
-import hashlib
-import json
 import threading
 import time
 
@@ -38,91 +36,19 @@ def test_manual_search_ranks_matching_command_first(monkeypatch) -> None:
     assert "set_scan_signal" in results[0].text
 
 
-def test_hybrid_search_finds_english_manual_passage_for_chinese_query():
-    class Embedder:
-        def embed_query(self, text, deadline_monotonic=None, clock=time.monotonic):
-            assert "中文扫描使能" in text
-            return (1.0, 0.0)
-
-    relevant = ManualChunk(1, 0, "Configure scan enable with set_scan_signal.")
-    irrelevant = ManualChunk(2, 0, "The scan chain report lists chain lengths.")
-    index = ManualIndex((relevant, irrelevant), ((1.0, 0.0), (0.0, 1.0)), Embedder())
-
-    assert index.search(["中文扫描使能"], limit=1) == [relevant]
-
-
-def test_hybrid_search_falls_back_to_keywords_when_query_embedding_fails():
-    class BrokenEmbedder:
-        def embed_query(self, *_args, **_kwargs):
-            raise RuntimeError("model execution failed")
-
-    exact = ManualChunk(1, 0, "set_scan_signal configuration")
-    other = ManualChunk(2, 0, "scan chain output")
-    index = ManualIndex((exact, other), ((1.0, 0.0), (0.0, 1.0)), BrokenEmbedder())
-
-    assert index.search(["set_scan_signal"], limit=1) == [exact]
-
-
-def test_manual_load_builds_semantic_vectors_when_embedder_is_available(monkeypatch):
+def test_manual_load_builds_keyword_index_without_embedding_state(monkeypatch):
     class Reader:
         def __init__(self, _path):
             self.pages = [_Page("Configure scan enable with set_scan_signal.")]
 
-    class Embedder:
-        def embed_documents(self, texts, deadline_monotonic=None, clock=time.monotonic):
-            return ((1.0, 0.0) for _ in texts)
-
-        def embed_query(self, text, deadline_monotonic=None, clock=time.monotonic):
-            return (1.0, 0.0)
-
     monkeypatch.setattr(manual, "PdfReader", Reader)
-    result = load_manual(Path("manual.pdf"), embedder=Embedder())
+    result = load_manual(Path("manual.pdf"))
 
     assert result.available is True
-    assert result.semantic_available is True
-    assert result.semantic_error is None
     assert result.index is not None
-    assert result.index.embeddings == ((1.0, 0.0),)
-
-
-def test_manual_load_uses_cache_only_for_matching_pdf_and_chunks(monkeypatch, tmp_path):
-    class Reader:
-        def __init__(self, _path):
-            self.pages = [_Page("Configure scan enable with set_scan_signal.")]
-
-    class Embedder:
-        def __init__(self):
-            self.document_calls = 0
-
-        def embed_documents(self, texts, deadline_monotonic=None, clock=time.monotonic):
-            self.document_calls += 1
-            return ((0.0, 1.0) for _ in texts)
-
-        def embed_query(self, text, deadline_monotonic=None, clock=time.monotonic):
-            return (1.0, 0.0)
-
-    monkeypatch.setattr(manual, "PdfReader", Reader)
-    pdf_path = tmp_path / "manual.pdf"
-    pdf_path.write_bytes(b"stable manual")
-    cache_path = tmp_path / "manual-index.json"
-    cache_path.write_text(json.dumps({
-        "format_version": 1,
-        "model_revision": manual.QWEN_MODEL_REVISION,
-        "pdf_sha256": hashlib.sha256(pdf_path.read_bytes()).hexdigest(),
-        "chunk_keys": [[1, 0]],
-        "embeddings": [[1.0, 0.0]],
-    }), encoding="utf-8")
-    embedder = Embedder()
-
-    cached = load_manual(pdf_path, embedder=embedder, embedding_index_path=cache_path)
-    assert cached.semantic_available is True
-    assert cached.index is not None and cached.index.embeddings == ((1.0, 0.0),)
-    assert embedder.document_calls == 0
-
-    pdf_path.write_bytes(b"different manual")
-    rebuilt = load_manual(pdf_path, embedder=embedder, embedding_index_path=cache_path)
-    assert rebuilt.semantic_available is True
-    assert embedder.document_calls == 1
+    assert result.index.search(["set_scan_signal"])[0].text == (
+        "Configure scan enable with set_scan_signal."
+    )
 
 
 def test_missing_manual_is_recorded_not_raised(tmp_path: Path) -> None:
@@ -174,9 +100,9 @@ def test_headings_start_new_chunks(monkeypatch) -> None:
     assert result.index is not None
     assert [chunk.text for chunk in result.index.chunks] == [
         "Introduction text",
-        "## Scan configuration\nConfigure scan.",
-        "set_scan_signal\nSignal details.",
+        "## Scan configuration\nConfigure scan.\nset_scan_signal\nSignal details.",
     ]
+    assert result.index.chunks[-1].title == "## Scan configuration"
 
 
 def test_search_counts_terms_case_insensitively_and_breaks_ties_stably() -> None:
@@ -189,15 +115,140 @@ def test_search_counts_terms_case_insensitively_and_breaks_ties_stably() -> None
     assert ManualIndex(chunks).search(["dFtR9"]) == [chunks[3], chunks[2], chunks[1], chunks[0]]
 
 
-def test_command_in_first_200_characters_gets_bonus() -> None:
+def test_unrelated_command_does_not_get_bonus() -> None:
     chunks = (
-        ManualChunk(1, 0, "DFTR9 " + "x" * 200 + " set_scan_signal"),
+        ManualChunk(1, 0, "DFTR9 plain"),
         ManualChunk(2, 0, "set_scan_signal DFTR9"),
     )
     index = ManualIndex(chunks)
-    assert index.search(["DFTR9"], limit=1) == [chunks[1]]
+    assert index.search(["DFTR9"], limit=1) == [chunks[0]]
     assert index.search(["DFTR9"], limit=0) == []
     assert index.search(["DFTR9"], limit=-1) == []
+
+
+def test_chinese_headings_are_kept_and_command_examples_are_not_headings() -> None:
+    chunks = _page_chunks(
+        "Scan 引擎用户手册  运行 Scan 引擎\n2026-07-06  13\n"
+        "2.1.2.2 定义 DFT Signal\n设置测试使能信号\n"
+        "用户可以使用以下命令：\nset_scan_signal -type scan_enable\n"
+        "insert_dft_logic\n后续说明。",
+        18,
+    )
+    assert chunks[0].title == "2.1.2.2 定义 DFT Signal"
+    assert chunks[1].title == "2.1.2.2 定义 DFT Signal > 设置测试使能信号"
+    assert "insert_dft_logic\n后续说明。" in chunks[1].text
+    assert all("Scan 引擎用户手册" not in chunk.text for chunk in chunks)
+    assert all("2026-07-06" not in chunk.text for chunk in chunks)
+
+
+def test_heading_carries_to_next_page(monkeypatch) -> None:
+    class Reader:
+        def __init__(self, _path):
+            self.pages = [
+                _Page("2.1.2.4 配置 Scan Chain\nset_scan_cfg -chain_count 2"),
+                _Page("继续介绍链长。\nset_scan_cfg -max_length 100"),
+            ]
+
+    monkeypatch.setattr(manual, "PdfReader", Reader)
+    chunks = load_manual(Path("manual.pdf")).index.chunks
+    assert chunks[-1].title == "2.1.2.4 配置 Scan Chain"
+
+
+def test_exact_command_does_not_match_larger_identifier() -> None:
+    chunks = (
+        ManualChunk(1, 0, "reset_scan_signal is a different identifier"),
+        ManualChunk(2, 0, "set_scan_signal configures the signal"),
+    )
+    assert ManualIndex(chunks).search(["set_scan_signal"]) == [chunks[1]]
+
+
+def test_title_match_outweighs_a_single_body_mention() -> None:
+    chunks = (
+        ManualChunk(1, 0, "See the setup command elsewhere."),
+        ManualChunk(2, 0, "The command configures scan enable.", "设置测试使能信号"),
+    )
+    assert ManualIndex(chunks).search(["测试使能信号"])[0] == chunks[1]
+
+
+def test_shorter_equally_matching_chunk_ranks_first() -> None:
+    chunks = (
+        ManualChunk(1, 0, "DFTR9 " + "filler " * 200),
+        ManualChunk(2, 0, "DFTR9 explains the issue."),
+    )
+    assert ManualIndex(chunks).search(["DFTR9"])[0] == chunks[1]
+
+
+def test_empty_and_no_match_queries_return_no_chunks() -> None:
+    index = ManualIndex((ManualChunk(1, 0, "set_scan_signal"),))
+    assert index.search([]) == []
+    assert index.search(["  "]) == []
+    assert index.search(["no_such_command"]) == []
+
+
+def test_diverse_search_covers_each_query_group() -> None:
+    chunks = (
+        ManualChunk(1, 0, "set_scan_signal"),
+        ManualChunk(2, 0, "set_scan_signal set_scan_signal"),
+        ManualChunk(3, 0, "insert_dft_logic"),
+    )
+    assert ManualIndex(chunks).search_diverse(
+        [["set_scan_signal"], ["insert_dft_logic"]], limit=2,
+    ) == [chunks[1], chunks[2]]
+
+
+def test_title_phrase_prioritizes_reference_section_over_broad_example() -> None:
+    chunks = (
+        ManualChunk(1, 0, "load_lib load_netlist present_design set_scan_signal set_scan_cfg examine_scan_drc insert_dft_logic"),
+        ManualChunk(2, 0, "examine_scan_drc starts the check.", "2.1.3 执行 DRC"),
+    )
+    assert ManualIndex(chunks).search(["执行 DRC", "examine_scan_drc"])[0] == chunks[1]
+
+
+def test_group_result_contains_its_primary_command_when_available() -> None:
+    chunks = (
+        ManualChunk(1, 0, "配置 Scan Chain", "配置 Scan Chain"),
+        ManualChunk(2, 0, "set_scan_cfg -chain_count 2", "定义 Scan Chain 的数量和长度"),
+    )
+    assert ManualIndex(chunks).search_diverse(
+        [["配置 Scan Chain", "set_scan_cfg"]], limit=1,
+    ) == [chunks[1]]
+
+
+def test_group_prefers_reference_section_over_example_subsection() -> None:
+    chunks = (
+        ManualChunk(1, 0, "set_wrapper_cfg -style shared", "2.1.2.6 配置 Wrapper Chain > 定义 Wrapper 策略"),
+        ManualChunk(2, 0, "set_wrapper_cfg set_wrapper_cfg set_wrapper_cfg", "2.1.2.6 配置 Wrapper Chain > Wrapper Chain 示例"),
+    )
+    assert ManualIndex(chunks).search_diverse(
+        [["配置 Wrapper Chain", "set_wrapper_cfg"]], limit=1,
+    ) == [chunks[0]]
+
+
+def test_drc_rule_definition_outweighs_a_log_example() -> None:
+    chunks = (
+        ManualChunk(1, 0, "DFTR9 DFTR9 DFTR9 is shown in a log."),
+        ManualChunk(2, 0, "DFTR9 检查时钟打开时时序元件是否正常开启。" + "其他说明" * 80),
+    )
+    assert ManualIndex(chunks).search(["DFTR9"])[0] == chunks[1]
+
+
+def test_sentence_fragment_and_table_row_are_not_headings() -> None:
+    chunks = _page_chunks(
+        "2.2.1 替换寄存器\n1 Total Flip-Flop (FF) Count 400\n移位寄存器中的 DFF\n"
+        "将删除之前指定设计的所有相关配置。如果用户指定的设计名称和网表文件中的\n"
+        "后续说明。",
+        70,
+    )
+    assert len(chunks) == 1
+    assert chunks[0].title == "2.2.1 替换寄存器"
+
+
+def test_hyphenated_drc_rule_is_a_single_identifier() -> None:
+    chunks = (
+        ManualChunk(1, 0, "DFTR-L1 Warning Error", "2.1.3.3 调整 DRC 违例等级"),
+        ManualChunk(2, 0, "DFTR-L1 检查锁存器规则。", "2.1.3.1 DRC 规则"),
+    )
+    assert ManualIndex(chunks).search(["DFTR-L1"])[0] == chunks[1]
 
 
 def test_extraction_failure_is_recorded_not_raised(monkeypatch) -> None:
@@ -282,3 +333,13 @@ def test_manual_search_checks_deadline_between_chunks() -> None:
     ticks = iter((0.0, 0.0, 2.0))
     with pytest.raises(DeadlineExceeded, match="manual search deadline"):
         index.search(["scan"], deadline_monotonic=1.0, clock=lambda: next(ticks))
+
+
+def test_manual_index_build_checks_deadline_between_chunks() -> None:
+    ticks = iter((0.0, 2.0))
+    with pytest.raises(DeadlineExceeded, match="manual PDF loading deadline"):
+        ManualIndex(
+            (ManualChunk(1, 0, "scan"), ManualChunk(1, 1, "scan")),
+            _build_deadline=1.0,
+            _build_clock=lambda: next(ticks),
+        )

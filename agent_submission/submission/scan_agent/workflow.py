@@ -31,6 +31,7 @@ from .inputs import (InputMutationError, assert_inputs_unchanged, classify_task,
 from .llm import (LLMClient, LLMConfigurationError, LLMOutputError, LLMTransportError,
                   Requirements, _requirements, extract_requirements, requirements_data)
 from .manual import ManualChunk, ManualIndex, ManualLoadResult, load_manual
+from .manual_queries import initial_query_groups, repair_query_groups
 from .runner import LaunchMode, ToolResult, run_scan_tool
 from .reports import ReportEvidence, collect_report_evidence
 from .state import AgentStatus, Budget, InputInventory
@@ -39,6 +40,7 @@ from .validation import ValidationReport, validate_run
 
 _STARTUP_INPUT_SCAN_SECONDS = 10.0
 _DEADLINE_FAILURE_REASON = "absolute deadline reached during failure finalization"
+_MAX_MANUAL_CHUNKS = 14
 
 
 @dataclass
@@ -257,20 +259,16 @@ def _terminal_failure(state: WorkflowState) -> dict:
 
 def _chunks(
     state: WorkflowState,
-    terms: list[str],
+    groups: list[list[str]],
     deadline_monotonic: float | None = None,
     clock: Callable[[], float] = time.monotonic,
 ) -> list:
     manual = state.get("manual")
-    return manual.index.search(
-        terms,
+    return manual.index.search_diverse(
+        groups,
+        limit=min(_MAX_MANUAL_CHUNKS, max(6, len(groups))),
         deadline_monotonic=deadline_monotonic,
         clock=clock,
-        semantic_query=(
-            f"Task type: {state.get('task_type', '')}. Retrieval focus: {'; '.join(terms)}. "
-            f"Scan requirements: {json.dumps(requirements_data(state['requirements']), ensure_ascii=False, sort_keys=True)}"
-            if "requirements" in state else "; ".join(terms)
-        ),
     ) if manual and manual.index else []
 
 
@@ -371,9 +369,7 @@ def _publish_decision(
         "manual": {
             "available": manual.available if manual else None,
             "error": state.get("manual_error"),
-            "semantic_available": manual.semantic_available if manual else None,
-            "semantic_error": manual.semantic_error if manual else None,
-            "retrieval": "hybrid_qwen3_keyword" if manual and manual.semantic_available else "keyword_only",
+            "retrieval": "keyword_only" if manual and manual.available else None,
         },
         "requirement_mapping": build_requirement_mapping(
             requirements, configurations, state["validation_results"], deadline_monotonic, clock,
@@ -526,7 +522,8 @@ def build_workflow(dependencies: WorkflowDependencies) -> CompiledStateGraph:
         try:
             proposal = call_model(state, dependencies.repairer, state["requirements"], current,
                                   diagnostics, history, _chunks(
-                                      state, terms, work_deadline(state), dependencies.clock,
+                                      state, repair_query_groups(state["requirements"], terms),
+                                      work_deadline(state), dependencies.clock,
                                   ))
             update = _accept_proposal(proposal, state)
             record.update(diagnosis={"problem_type": proposal.problem_type, "root_cause": proposal.root_cause,
@@ -564,7 +561,7 @@ def build_workflow(dependencies: WorkflowDependencies) -> CompiledStateGraph:
                                   original, diagnostics, [], ["examine_scan_drc", "examine_scan_chain", "insert_dft_logic"])
         proposal = call_model(state, dependencies.initial_generator, state["requirements"],
                                                   state["inventory"], _chunks(
-                                                  state, ["scan", "insert_dft_logic"],
+                                                  state, initial_query_groups(state["requirements"]),
                                                       work_deadline(state), dependencies.clock,
                                                   ))
         return _accept_proposal(proposal, state)

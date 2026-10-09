@@ -118,10 +118,14 @@ class LLMClient:
 
     @classmethod
     def from_env(cls) -> "LLMClient":
-        settings = {name: os.environ.get(name, "").strip() for name in ("LLM_API_KEY", "LLM_BASE_URL", "LLM_MODEL")}
-        missing = [name for name, value in settings.items() if not value]
-        if missing:
-            raise LLMConfigurationError("missing model configuration: " + ", ".join(missing))
+        settings = {
+            "LLM_API_KEY": os.environ.get("LLM_API_KEY", "").strip(),
+            "LLM_BASE_URL": os.environ.get("LLM_BASE_URL", "").strip()
+            or "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            "LLM_MODEL": os.environ.get("LLM_MODEL", "").strip() or "deepseek-v4-pro",
+        }
+        if not settings["LLM_API_KEY"]:
+            raise LLMConfigurationError("missing model configuration: LLM_API_KEY")
         from openai import OpenAI
         sdk = OpenAI(api_key=settings["LLM_API_KEY"], base_url=settings["LLM_BASE_URL"], max_retries=0)
         return cls(transport=sdk.chat.completions.create, model=settings["LLM_MODEL"])
@@ -179,7 +183,11 @@ def inventory_data(inventory: InputInventory) -> dict[str, list[str]]:
 
 
 def manual_data(chunks: Sequence[ManualChunk]) -> list[dict[str, object]]:
-    return [{"page": chunk.page, "chunk_index": chunk.chunk_index, "text": chunk.text} for chunk in chunks]
+    return [
+        {**{"page": chunk.page, "chunk_index": chunk.chunk_index, "text": chunk.text},
+         **({"title": chunk.title} if chunk.title else {})}
+        for chunk in chunks
+    ]
 
 
 def requirements_data(requirements: Requirements) -> dict[str, object]:

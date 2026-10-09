@@ -15,8 +15,8 @@ def test_parser_extracts_rule_counts_and_fatal_errors():
 
 
 def test_hyphenated_rules_subrules_objects_and_explicit_counts():
-    violations = parse_drc_text("[WARNING] [DFTDRC-4005] Clock of 'reg[0]' inactive (DFTR9-1)\nDFTR-TIE0: 12 violations\nDFTR-TIE1 count = 0\nDFTR10 | 21\n")
-    assert [(item.rule, item.count) for item in violations] == [("DFTR9-1", 1), ("DFTR-TIE0", 12), ("DFTR-TIE1", 0), ("DFTR10", 21)]
+    violations = parse_drc_text("[WARNING] [DFTDRC-4005] Clock of 'reg[0]' inactive (DFTR9-1)\nDFTR-TIE0: 12 violations\nDFTR-TIE1 count = 0\nDFTR10 | 21\nDFTR-L1: 2 violations\n")
+    assert [(item.rule, item.count) for item in violations] == [("DFTR9-1", 1), ("DFTR-TIE0", 12), ("DFTR-TIE1", 0), ("DFTR10", 21), ("DFTR-L1", 2)]
     assert violations[0].objects == ("reg[0]",)
     assert violations[0].severity == "WARNING"
     assert violations[0].code == "DFTDRC-4005"

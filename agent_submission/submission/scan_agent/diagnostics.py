@@ -58,7 +58,7 @@ class DiagnosticSummary:
 
 _SEVERITY = re.compile(r"\[(INFO|WARNING|WARN|ERROR|FATAL)\]", re.IGNORECASE)
 _CODE = re.compile(r"\[([A-Z][A-Z0-9]*-\d+)\]", re.IGNORECASE)
-_RULE = re.compile(r"\bDFTR(?:-TIE\d+|\d+)(?:-\d+)?\b", re.IGNORECASE)
+_RULE = re.compile(r"\bDFTR(?:-(?:TIE|L)\d+|\d+)(?:-\d+)?\b", re.IGNORECASE)
 _COMMAND = re.compile(r"\b(?:set|load|read|present|examine|insert|rpt|report|dump|write)_\w+\b")
 _TOTAL = re.compile(r"\b(?:DRC\s+)?Total\s+(?:DRC\s+)?violations\s*[:=]\s*(\d[\d,]*)\b", re.IGNORECASE)
 _COUNT = re.compile(r"^\s*(?:x\s*|(?:count|violations?)\s*[:=]\s*|[:=|]\s*)(\d[\d,]*)\b", re.IGNORECASE)

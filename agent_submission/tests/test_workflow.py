@@ -9,6 +9,7 @@ from helpers import (SAFE_DOFILE, diagnosis, failed_cmd_result, failed_drc_resul
                      fake_dependencies, make_task1_case, scripted_dependencies, successful_scan_result)
 from scan_agent.llm import LLMConfigurationError, LLMOutputError
 from scan_agent.deadline import DeadlineExceeded
+from scan_agent.manual import ManualChunk, ManualIndex, ManualLoadResult
 from scan_agent.workflow import WorkflowDependencies, build_workflow, run_agent
 
 
@@ -36,6 +37,18 @@ def test_single_run_modes(tmp_path, mode, status, runs):
     assert (output / "final_results").exists() == (status == "success")
     if status != "success":
         assert result.final_run is None
+
+
+def test_decision_log_records_keyword_only_manual_retrieval(tmp_path):
+    output = tmp_path / "output"
+    deps = fake_dependencies("success")
+    deps.manual_loader = lambda *_args: ManualLoadResult(
+        True, ManualIndex((ManualChunk(1, 0, "set_scan_signal configures scan enable."),)),
+    )
+
+    assert run_agent(make_task1_case(tmp_path), output, deps).status == "success"
+    manual_audit = audit(output)["manual"]
+    assert manual_audit == {"available": True, "error": None, "retrieval": "keyword_only"}
 
 
 def test_three_failed_runs_never_attempts_fourth(tmp_path):

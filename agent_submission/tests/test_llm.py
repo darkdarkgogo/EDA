@@ -52,6 +52,14 @@ def extract(transport):
     )
 
 
+def test_manual_data_includes_nonempty_title():
+    from scan_agent.llm import manual_data
+
+    assert manual_data([ManualChunk(18, 0, "set_scan_signal", "设置测试使能信号")]) == [
+        {"page": 18, "chunk_index": 0, "text": "set_scan_signal", "title": "设置测试使能信号"},
+    ]
+
+
 def test_complete_json_retries_once_after_invalid_json():
     transport = FakeTransport(["not-json", '{"task_type":"task1"}'])
     result = LLMClient(transport=transport, model="deepseek-v4-pro", max_retries=2).complete_json("system", "user")
@@ -103,7 +111,7 @@ def test_transport_errors_have_bounded_retries_and_hide_error_secrets():
     assert "API-key-secret" not in str(error.value)
 
 
-@pytest.mark.parametrize("missing", ["LLM_API_KEY", "LLM_BASE_URL", "LLM_MODEL"])
+@pytest.mark.parametrize("missing", ["LLM_API_KEY"])
 def test_from_env_rejects_missing_configuration_before_constructing_sdk(monkeypatch, missing):
     for key, value in {"LLM_API_KEY": "key", "LLM_BASE_URL": "https://example.test/v1", "LLM_MODEL": "m"}.items():
         monkeypatch.setenv(key, value)
@@ -111,6 +119,27 @@ def test_from_env_rejects_missing_configuration_before_constructing_sdk(monkeypa
     monkeypatch.setitem(sys.modules, "openai", SimpleNamespace(OpenAI=lambda **kwargs: pytest.fail("SDK constructed before env validation")))
     with pytest.raises(LLMConfigurationError, match=missing):
         LLMClient.from_env()
+
+
+def test_from_env_defaults_endpoint_and_model(monkeypatch):
+    monkeypatch.setenv("LLM_API_KEY", "key")
+    monkeypatch.delenv("LLM_BASE_URL", raising=False)
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+    created = {}
+
+    def sdk(**kwargs):
+        created.update(kwargs)
+        return SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=lambda **_request: None)))
+
+    monkeypatch.setitem(sys.modules, "openai", SimpleNamespace(OpenAI=sdk))
+    client = LLMClient.from_env()
+
+    assert created == {
+        "api_key": "key",
+        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "max_retries": 0,
+    }
+    assert client.model == "deepseek-v4-pro"
 
 
 def test_from_env_wraps_chat_completions_and_disables_sdk_retries(monkeypatch):
