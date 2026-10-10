@@ -45,11 +45,17 @@ def test_offline_success_has_closed_decision_log(tmp_path, task2):
     output = tmp_path / "output"
     result = run_agent(case, output, dependencies=dependencies())
     payload = json.loads((output / "decision_log.json").read_text(encoding="utf-8"))
-    assert result.final_run == payload["final_run"] == "R1"
+    final_id = "R2" if task2 else "R1"
+    assert result.final_run == payload["final_run"] == final_id
     assert payload["task_type"] == ("task2" if task2 else "task1")
     validate_references(output, payload)
     requirements = json.loads((output / "requirements.json").read_text(encoding="utf-8"))
-    assert {entry["field"]: json.loads(entry["requested_json"]) for entry in payload["requirement_mapping"]} == requirements
+    assert {entry["field"]: json.loads(entry["requested_json"]) for entry in payload["requirement_audit"]} == requirements
+    for entry in payload["requirement_mapping"]:
+        ref = entry["config_ref"]
+        line = int(ref["locator"][1:])
+        dofile_lines = (output / ref["source"]).read_text(encoding="utf-8").splitlines()
+        assert dofile_lines[line - 1].strip() == entry["dft_config"]
     assert payload["manual"]["available"] is False
     assert payload["token_usage"] == [{"model": "test-only", "prompt_tokens": 11,
                                        "completion_tokens": 7, "total_tokens": 18}] * 2
@@ -59,14 +65,53 @@ def test_offline_success_has_closed_decision_log(tmp_path, task2):
     assert len(payload["final_artifacts"]) >= 4
     for artifact in payload["final_artifacts"]:
         assert sha256(output / artifact["path"]) == sha256(output / artifact["source"]) == artifact["sha256"]
-    assert sha256(output / "final_results/deliverables/post_scan.v") == sha256(output / "runs/R1/deliverables/post_scan.v")
-    assert payload["file_changes"] == []
+    assert sha256(output / "final_results/deliverables/post_scan.v") == sha256(
+        output / f"runs/{final_id}/deliverables/post_scan.v")
+    assert payload["file_changes"] == ([] if not task2 else [payload["file_changes"][0]])
     if task2:
+        assert [(run["run_id"], run.get("role")) for run in payload["tool_runs"]] == [
+            ("R1", "original"), ("R2", None)]
+        assert (output / "runs/R1/R1.log").is_file()
+        assert (output / "runs/R1/deliverables/R1.dofile").read_text(encoding="utf-8") == (
+            case / "original.dofile").read_text(encoding="utf-8")
+        assert payload["file_changes"][0]["change_id"] == "F1"
+        assert payload["file_changes"][0]["diff_path"] == "diffs/dofile_R1_to_R2.diff"
         issue = payload["issue_resolutions"][0]
-        assert issue["found"]["source"] == "original_static_diagnostics.json"
+        assert issue["found"]["run_ref"] == "R1"
+        assert issue["found"]["source"].startswith("runs/R1/")
         assert issue["verify"]["passed"] is True
     else:
         assert payload["issue_resolutions"] == []
+
+
+def test_task2_never_reads_public_preset_issues(tmp_path, monkeypatch):
+    case = make_task1_case(tmp_path)
+    (case / "original.dofile").write_text(
+        "# original\n" + SAFE_DOFILE.replace("insert_dft_logic", "exec forbidden"),
+        encoding="utf-8",
+    )
+    preset = case / "preset_issues.json"
+    preset.write_text('{"问题列表":[{"现象":"fabricated answer"}]}', encoding="utf-8")
+    real_open = Path.open
+    real_read_text = Path.read_text
+
+    def checked_open(path, *args, **kwargs):
+        assert path != preset
+        return real_open(path, *args, **kwargs)
+
+    def checked_read_text(path, *args, **kwargs):
+        assert path != preset
+        return real_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", checked_open)
+    monkeypatch.setattr(Path, "read_text", checked_read_text)
+    output = tmp_path / "output"
+    result = run_agent(case, output, dependencies("repair"))
+    assert result.status == "success"
+    payload = json.loads((output / "decision_log.json").read_text(encoding="utf-8"))
+    assert payload["final_run"] == "R2"
+    assert "fabricated answer" not in json.dumps(payload, ensure_ascii=False)
+    assert [run["run_id"] for run in payload["tool_runs"]] == ["R1", "R2"]
 
 
 def test_tool_unavailable_never_creates_fake_final_artifacts(tmp_path):
@@ -95,17 +140,27 @@ def test_two_run_repair_closes_found_diagnosis_fix_verify(tmp_path, task2):
     assert result.final_run == payload["final_run"] == "R2"
     validate_references(output, payload)
     issue = payload["issue_resolutions"][-1]
-    assert issue["found"]["source"] == "runs/R1/validation.json"
+    assert issue["found"]["source"] == ("runs/R1/R1.log" if task2 else "runs/R1/validation.json")
+    assert issue["found"]["run_ref"] == "R1"
     assert issue["diagnosis"]["root_cause"] == "fixture diagnosis"
     assert issue["fix"]["summary"] == "fixture correction"
     assert issue["verify"]["run_id"] == "R2"
     assert issue["verify"]["passed"] is True
-    assert issue["history"][0]["dofile_hash"] == sha256(output / "runs/R1/deliverables/R1.dofile")
-    assert len(payload["tool_runs"]) == len(payload["validation_results"]) == 2
-    assert len(payload["issue_resolutions"]) == (2 if task2 else 1)
-    assert payload["file_changes"][0]["diff"] == "diffs/dofile_R1_to_R2.diff"
-    diff = (output / payload["file_changes"][0]["diff"]).read_text(encoding="utf-8")
-    assert "-# candidate 0" in diff and "+# candidate 1" in diff
+    if task2:
+        assert issue["found"]["excerpt"] in (output / "runs/R1/R1.log").read_text(encoding="utf-8")
+        assert issue["history"] == []
+    else:
+        assert issue["history"][0]["dofile_hash"] == sha256(output / "runs/R1/deliverables/R1.dofile")
+    assert len(payload["tool_runs"]) == 2
+    assert len(payload["validation_results"]) == (1 if task2 else 2)
+    assert len(payload["issue_resolutions"]) >= (2 if task2 else 1)
+    repair_change = payload["file_changes"][-1]
+    assert repair_change["diff"] == "diffs/dofile_R1_to_R2.diff"
+    diff = (output / repair_change["diff"]).read_text(encoding="utf-8")
+    if task2:
+        assert "-exec forbidden" in diff and "+insert_dft_logic" in diff
+    else:
+        assert "-# candidate 0" in diff and "+# candidate 1" in diff
     for artifact in payload["final_artifacts"]:
         assert artifact["source"].startswith("runs/R2/")
         assert sha256(output / artifact["path"]) == sha256(output / artifact["source"]) == artifact["sha256"]
@@ -317,7 +372,7 @@ def test_failed_success_publication_retains_usage_and_prior_audit_evidence(tmp_p
     assert payload["token_usage"] == [{"model": "test-only", "prompt_tokens": 11,
                                       "completion_tokens": 7, "total_tokens": 18}] * 3
     assert payload["token_usage_available"] is True
-    assert {item["field"]: json.loads(item["requested_json"]) for item in payload["requirement_mapping"]} == json.loads(
+    assert {item["field"]: json.loads(item["requested_json"]) for item in payload["requirement_audit"]} == json.loads(
         (output / "requirements.json").read_text(encoding="utf-8"))
     assert payload["manual"]["available"] is False
     assert len(payload["tool_runs"]) == len(payload["validation_results"]) == 2

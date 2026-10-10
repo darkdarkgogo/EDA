@@ -155,9 +155,11 @@ def hash_protected_inputs(
     deadline_monotonic: float | None = None,
     clock: Callable[[], float] = time.monotonic,
 ) -> dict[str, str]:
-    """Hash every regular input, including answer files, solely for integrity."""
+    """Hash case inputs while leaving the public issue answer file unopened."""
     hashes = {}
     for path in _regular_files(input_dir, deadline_monotonic, clock):
+        if path.name == "preset_issues.json":
+            continue
         check_deadline(deadline_monotonic, clock, "input hashing")
         digest = hashlib.sha256()
         with path.open("rb") as source:

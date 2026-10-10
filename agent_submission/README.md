@@ -156,6 +156,6 @@ Candidate/model response/repair records retain the evidence behind each decision
 On failure, `final_run` is null and no fake final netlist or reports are created.
 Missing `dftexp_scan` yields failure evidence and a nonzero result. Input files
 are protected by SHA-256 checks. Runtime inventory excludes `golden.dofile` and
-`preset_issues.json`; their contents are never used for model input or decisions
-(the integrity pass hashes all regular input files). Reusing an output directory
+`preset_issues.json`; neither is used for model input or decisions. The integrity
+pass also skips reading `preset_issues.json`. Reusing an output directory
 with previous evidence quarantines it and returns `compliance_failure`.

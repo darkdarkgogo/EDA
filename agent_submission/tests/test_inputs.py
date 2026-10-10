@@ -141,7 +141,7 @@ def test_inventory_never_opens_input_contents(tmp_path: Path, monkeypatch) -> No
     assert inventory_inputs(tmp_path).runtime_files == ["task_spec.md"]
 
 
-def test_hashes_cover_all_regular_files_with_streamed_reads(tmp_path: Path, monkeypatch) -> None:
+def test_hashes_skip_preset_issues_and_stream_other_files(tmp_path: Path, monkeypatch) -> None:
     content = b"x" * (2 * 1024 * 1024 + 13)
     names = [".case_ready", "golden.dofile", "preset_issues.json", "netlist.v"]
     for name in names:
@@ -165,13 +165,15 @@ def test_hashes_cover_all_regular_files_with_streamed_reads(tmp_path: Path, monk
 
     def tracked_open(path, mode="r", *args, **kwargs):
         assert mode == "rb"
+        assert path.name != "preset_issues.json"
         return TrackedReader(real_open(path, mode, *args, **kwargs))
 
     monkeypatch.setattr(Path, "open", tracked_open)
     actual = hash_protected_inputs(tmp_path)
-    assert list(actual) == sorted(names)
-    assert actual == {name: hashlib.sha256(content).hexdigest() for name in names}
-    assert reads == [1024 * 1024] * 16
+    protected = sorted(set(names) - {"preset_issues.json"})
+    assert list(actual) == protected
+    assert actual == {name: hashlib.sha256(content).hexdigest() for name in protected}
+    assert reads == [1024 * 1024] * 12
 
 
 def test_missing_input_directory_is_not_an_empty_valid_inventory(tmp_path: Path) -> None:

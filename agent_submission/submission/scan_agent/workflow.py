@@ -18,11 +18,11 @@ from typing import Callable, TypedDict
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
-from .artifacts import (FinalManifest, RunPaths, build_issue_resolutions, build_requirement_mapping,
+from .artifacts import (FinalManifest, RunPaths, build_formal_requirement_mapping, build_initial_task2_issues, build_issue_resolutions, build_requirement_mapping,
                         build_tool_runs, create_run, promote_final, quarantine_existing_evidence,
                         owned_output_entries,
                         validate_references, verify_final_manifest,
-                        write_decision_log, write_dofile_diff, write_json_atomic, write_run_dofile)
+                        write_decision_log, write_dofile_diff, write_json_atomic, write_original_dofile, write_run_dofile)
 from .diagnostics import DiagnosticSummary, parse_tool_log
 from .deadline import DeadlineExceeded, check_deadline, iter_paths_with_deadline
 from .dofile import (DofileProposal, RepairRecord, _proposal, generate_initial_dofile,
@@ -98,6 +98,7 @@ class WorkflowState(TypedDict, total=False):
     current_dofile: str
     previous_dofile: str | None
     current_run: int
+    original_run: bool
     paths: RunPaths
     tool_result: ToolResult
     diagnostics: DiagnosticSummary
@@ -386,6 +387,11 @@ def _publish_decision(
     runs = build_tool_runs(output, state["tool_runs"], deadline_monotonic, clock)
     configurations = [{"source": run["dofile_file"], "locator": "complete executed dofile"} for run in runs]
     requirements = requirements_data(state["requirements"]) if state.get("requirements") else {}
+    task = "task2" if state.get("task_type") == "task2" else "task1"
+    spec = state["input_dir"] / "task_spec.md"
+    case_id = "case_" + hashlib.sha256(
+        spec.read_bytes() if spec.is_file() else str(state["input_dir"]).encode()
+    ).hexdigest()[:12]
     manual = state.get("manual")
     response_dir = output / "model_responses"
     responses = () if not response_dir.is_dir() else (
@@ -394,7 +400,11 @@ def _publish_decision(
         ) if path.parent == response_dir and path.match("response_*.json")
     )
     payload = {
+        "case_id": case_id, "task": task,
         "status": state["status"], "final_run": state.get("final_run"),
+        "summary": (f"{task} {'完成' if state['status'] == AgentStatus.SUCCESS else '未完成'}；"
+                    f"实际运行 {len(runs)} 轮；最终采用 {state.get('final_run') or '无'}。"
+                    f"{('扫描链目标 ' + str(requirements.get('chain_constraints', {}).get('chain_count'))) if isinstance(requirements.get('chain_constraints'), dict) and requirements.get('chain_constraints', {}).get('chain_count') else ''}"),
         "failure_reason": state.get("failure_reason"), "task_type": state.get("task_type"),
         "manual_error": state.get("manual_error"),
         "manual": {
@@ -402,11 +412,17 @@ def _publish_decision(
             "error": state.get("manual_error"),
             "retrieval": "keyword_only" if manual and manual.available else None,
         },
-        "requirement_mapping": build_requirement_mapping(
-            requirements, configurations, state["validation_results"], deadline_monotonic, clock,
+        "requirement_mapping": build_formal_requirement_mapping(
+            requirements, output / "final_results" / "deliverables" / "final.dofile",
         ),
-        "issue_resolutions": build_issue_resolutions(
-            output, runs, state["validation_results"], deadline_monotonic, clock,
+        "requirement_audit": build_requirement_mapping(
+            requirements, configurations, state["validation_results"], deadline_monotonic, clock,
+            output / "final_results" / "deliverables" / "final.dofile",
+        ),
+        "issue_resolutions": (build_initial_task2_issues(
+            output, state["input_dir"], runs, state["validation_results"], state["file_changes"], deadline_monotonic, clock,
+        ) if task == "task2" else []) + build_issue_resolutions(
+            output, runs, state["validation_results"], deadline_monotonic, clock, state["file_changes"],
         ),
         "tool_runs": runs,
         "file_changes": state["file_changes"], "validation_results": state["validation_results"],
@@ -420,6 +436,12 @@ def _publish_decision(
         payload["final_artifacts"] = verify_final_manifest(
             output, state["final_manifest"], deadline_monotonic, clock,
         )
+    for number, issue in enumerate(payload["issue_resolutions"], 1):
+        issue["issue_id"] = f"I{number}"
+    if task == "task2":
+        closed = sum(bool(issue.get("attempts") and issue["attempts"][-1]["verify"].get("resolved"))
+                     for issue in payload["issue_resolutions"])
+        payload["summary"] += f" 记录 {len(payload['issue_resolutions'])} 项原始问题，其中 {closed} 项有修正后工具验证证据。"
     write_decision_log(output, payload, deadline_monotonic, clock)
 
 
@@ -557,6 +579,40 @@ def build_workflow(dependencies: WorkflowDependencies) -> CompiledStateGraph:
             raise ValueError("invalid manual result")
         return {"manual": manual, "manual_error": manual.error}
 
+    def run_original(state):
+        if state["task_type"] != "task2":
+            return {}
+        _integrity(state, work_deadline(state), dependencies.clock)
+        if state["budget"].max_tool_runs < 2:
+            return _failure(AgentStatus.BUDGET_EXHAUSTED, "task two requires an original run and a correction run")
+        original = _read_text(
+            require_semantic_input(state["input_dir"], "original.dofile"),
+            work_deadline(state), dependencies.clock,
+        )
+        paths = create_run(state["output_dir"], 1)
+        write_run_dofile(paths, original)
+        # Original scripts commonly resolve lib/netlist from [info script].
+        # Link input directories into that directory without editing the script
+        # or copying large protected netlists.
+        for source in state["input_dir"].iterdir():
+            if source.is_dir():
+                destination = paths.deliverables / source.name
+                try:
+                    destination.symlink_to(source, target_is_directory=True)
+                except OSError:
+                    if os.name == "nt":
+                        shutil.copytree(source, destination)
+                    elif dependencies.tool_runner is run_scan_tool:
+                        raise
+        original_state = {**state, "paths": paths, "original_run": True}
+        outcome = run_tool(original_state)
+        result = outcome.get("tool_result")
+        if result is not None and result.failure_kind in {"tool_unavailable", "invalid_tool_outcome"}:
+            outcome["status"] = AgentStatus.TOOL_FAILURE
+            outcome["failure_reason"] = result.failure_kind
+        return {**outcome, "paths": paths, "current_run": 1, "current_dofile": original,
+                "previous_dofile": original, "original_run": False}
+
     def repair_attempt(state, found, current, diagnostics, history, terms):
         # Persist the attempt before any model/manual work that can fail or run
         # out of budget. Graph updates are not committed when a node raises.
@@ -602,17 +658,30 @@ def build_workflow(dependencies: WorkflowDependencies) -> CompiledStateGraph:
             static = asdict(safety)
             static["original_text"] = original
             write_json_atomic(state["output_dir"] / "original_static_diagnostics.json", static)
-            # Preserve the supplied script and its exact rejected lines as evidence.
-            details = [f"[ERROR] line {item.line_number}: {item.reason}: {item.line}" for item in safety.rejections]
-            details.extend(f"[ERROR] missing phase: {phase}" for phase in safety.missing_phases)
-            diagnostics = parse_tool_log("\n".join(details))
+            write_original_dofile(state["output_dir"], original)
+            # Static checks may guide the repair, but only R1 is reported as
+            # tool evidence. Never turn static rejections into invented logs.
+            original_run = next((item for item in state["tool_runs"] if item.get("role") == "original"), None)
+            if original_run is None:
+                raise ValueError("task-two correction requires the original tool run")
+            original_log = _read_text(
+                state["output_dir"] / original_run["log_file"],
+                work_deadline(state), dependencies.clock,
+            )
+            diagnostics = parse_tool_log(original_log)
+            observed = next(((number, line) for number, line in enumerate(original_log.splitlines(), 1)
+                             if "[ERROR]" in line or "[WARNING]" in line or "DFTR" in line), None)
+            found = {"run_ref": original_run["run_id"],
+                     "source": original_run["log_file"] if observed else original_run["dofile_file"],
+                     "locator": f"L{observed[0]}" if observed else "L1",
+                     "excerpt": observed[1] if observed else (original.splitlines()[0] if original.splitlines() else ""),
+                     "dofile_hash": _hash(original)}
             if state["requirements"].netlists[0] not in {
                 "netlist/pre_scan.v", "netlist/ethernet_sky130.v", "netlist/tv80.v",
                 "netlist/cv32e40p.v", "netlist/veer_eh1.v",
             }:
-                return repair_attempt(state, {"source": "original_static_diagnostics.json", "locator": "rejections and missing_phases",
-                                              "dofile_hash": _hash(original)},
-                                      original, diagnostics, [], ["examine_scan_drc", "examine_scan_chain", "insert_dft_logic"])
+                return repair_attempt(state, found, original, diagnostics, [],
+                                      ["examine_scan_drc", "examine_scan_chain", "insert_dft_logic"])
         proposal = call_model(state, dependencies.initial_generator, state["requirements"],
                                                   state["inventory"], _chunks(
                                                   state, initial_query_groups(state["requirements"]),
@@ -636,10 +705,19 @@ def build_workflow(dependencies: WorkflowDependencies) -> CompiledStateGraph:
         paths = create_run(state["output_dir"], number)
         write_run_dofile(paths, state["current_dofile"])
         changes = list(state["file_changes"])
-        if number > 1:
+        if number == 1 and state["task_type"] == "task2":
+            original = (state["output_dir"] / "candidates" / "original.dofile").read_text(encoding="utf-8")
+            diff = write_dofile_diff(state["output_dir"], original, state["current_dofile"], "original", paths.run_id)
+            changes.append({"change_id": "F1", "type": "dofile", "path": paths.dofile.relative_to(state["output_dir"]).as_posix(),
+                            "diff_path": diff.relative_to(state["output_dir"]).as_posix(), "lec_ref": "",
+                            "diff": diff.relative_to(state["output_dir"]).as_posix(),
+                            "before_file": "candidates/original.dofile", "after_file": paths.dofile.relative_to(state["output_dir"]).as_posix()})
+        elif number > 1:
             diff = write_dofile_diff(state["output_dir"], state["previous_dofile"], state["current_dofile"], f"R{number - 1}", paths.run_id)
             diff = diff.replace(diff.with_name("dofile_" + diff.name))
-            changes.append({"diff": diff.relative_to(state["output_dir"]).as_posix(),
+            changes.append({"change_id": f"F{len(changes) + 1}", "type": "dofile", "path": paths.dofile.relative_to(state["output_dir"]).as_posix(),
+                            "diff_path": diff.relative_to(state["output_dir"]).as_posix(), "lec_ref": "",
+                            "diff": diff.relative_to(state["output_dir"]).as_posix(),
                             "from_run": f"R{number - 1}", "to_run": paths.run_id,
                             "before_file": f"runs/R{number - 1}/deliverables/R{number - 1}.dofile",
                             "after_file": paths.dofile.relative_to(state["output_dir"]).as_posix()})
@@ -650,10 +728,17 @@ def build_workflow(dependencies: WorkflowDependencies) -> CompiledStateGraph:
             return {}
         paths = state["paths"]
         timeout = state["budget"].remaining(dependencies.clock()) - state["budget"].reserve_seconds
+        if state.get("original_run"):
+            # Leave most of the case budget for diagnosis and the corrected run.
+            timeout = min(timeout, 35.0, max(10.0, timeout * 0.25))
         if timeout <= 0:
             return _failure(AgentStatus.BUDGET_EXHAUSTED, "wall-time reserve reached before execution")
         try:
-            if dependencies.launch_mode == "file_flag":
+            if state.get("original_run") and dependencies.tool_runner is run_scan_tool:
+                result = dependencies.tool_runner(paths, paths.dofile, dependencies.executable, timeout,
+                                                  dependencies.env, launch_mode=dependencies.launch_mode,
+                                                  prepare_destinations=False)
+            elif dependencies.launch_mode == "file_flag":
                 result = dependencies.tool_runner(paths, paths.dofile, dependencies.executable, timeout, dependencies.env)
             else:
                 result = dependencies.tool_runner(paths, paths.dofile, dependencies.executable, timeout,
@@ -668,6 +753,8 @@ def build_workflow(dependencies: WorkflowDependencies) -> CompiledStateGraph:
                  "dofile_file": paths.dofile.relative_to(state["output_dir"]).as_posix(),
                  "metadata_file": (paths.root / "run_metadata.json").relative_to(state["output_dir"]).as_posix(),
                  "exit_code": result.exit_code, "timed_out": result.timed_out, "failure_kind": result.failure_kind}
+        if state.get("original_run"):
+            entry["role"] = "original"
         if not (paths.root / "run_metadata.json").is_file():
             invalid = result.failure_kind == "invalid_tool_outcome"
             write_json_atomic(paths.root / "run_metadata.json", {
@@ -778,13 +865,14 @@ def build_workflow(dependencies: WorkflowDependencies) -> CompiledStateGraph:
 
     builder = StateGraph(WorkflowState)
     nodes = {"inventory_input": inventory_input, "extract_requirements": requirements_node,
-             "load_manual": manual_node, "create_candidate": create_candidate, "prepare_run": prepare_run,
+             "load_manual": manual_node, "run_original": run_original,
+             "create_candidate": create_candidate, "prepare_run": prepare_run,
              "run_tool": run_tool, "parse_evidence": parse_evidence, "validate": validate,
              "diagnose_and_repair": diagnose_and_repair, "finalize_success": finalize_success,
              "finalize_failure": finalize_failure}
     for name, function in nodes.items():
         builder.add_node(name, guarded(function))
-    order = [START, "inventory_input", "extract_requirements", "load_manual", "create_candidate",
+    order = [START, "inventory_input", "extract_requirements", "load_manual", "run_original", "create_candidate",
              "prepare_run", "run_tool", "parse_evidence", "validate"]
     for source, target in zip(order, order[1:]):
         builder.add_edge(source, target)

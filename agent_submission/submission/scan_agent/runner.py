@@ -41,6 +41,7 @@ def run_scan_tool(
     timeout_seconds: float,
     env: Mapping[str, str],
     launch_mode: LaunchMode = "file_flag",
+    prepare_destinations: bool = True,
 ) -> ToolResult:
     """Execute without a shell, merging child output directly into the run log."""
     if not executable or isinstance(executable, (str, bytes)):
@@ -49,9 +50,10 @@ def run_scan_tool(
         raise ValueError("timeout_seconds must be finite and greater than zero")
     if launch_mode not in {"file_flag", "stdin_source"}:
         raise ValueError("launch_mode must be 'file_flag' or 'stdin_source'")
-    destinations = resolve_output_destinations(dofile_path.read_text(encoding="utf-8"), paths.work)
-    for destination in destinations:
-        destination.parent.mkdir(parents=True, exist_ok=True)
+    if prepare_destinations:
+        destinations = resolve_output_destinations(dofile_path.read_text(encoding="utf-8"), paths.work)
+        for destination in destinations:
+            destination.parent.mkdir(parents=True, exist_ok=True)
     resolved_dofile = dofile_path.resolve()
     try:
         resolved_dofile.relative_to(paths.root.resolve())

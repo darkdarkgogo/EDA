@@ -165,13 +165,15 @@ def test_task2_repairs_original_with_static_rejections(tmp_path):
     original = "# original\n" + SAFE_DOFILE.replace("insert_dft_logic", "exec forbidden")
     (case / "original.dofile").write_text(original, encoding="utf-8")
     output = tmp_path / "output"
-    deps = fake_dependencies("success")
+    deps = scripted_dependencies([failed_cmd_result(), successful_scan_result()])
     def no_generation(*args):
         pytest.fail("Task 2 must repair original.dofile")
     deps.initial_generator = no_generation
     result = run_agent(case, output, deps)
     assert result.status == "success"
     assert audit(output)["task_type"] == "task2"
+    assert [run["run_id"] for run in audit(output)["tool_runs"]] == ["R1", "R2"]
+    assert audit(output)["tool_runs"][0]["role"] == "original"
     static = json.loads((output / "original_static_diagnostics.json").read_text(encoding="utf-8"))
     assert any("exec forbidden" in rejection["line"] for rejection in static["rejections"])
     assert (case / "original.dofile").read_text(encoding="utf-8") == original
@@ -257,7 +259,7 @@ def test_cli_exit_zero_only_for_success(tmp_path, monkeypatch):
 def test_graph_order_matches_plan():
     graph = build_workflow(fake_dependencies("success")).get_graph()
     edges = {(edge.source, edge.target) for edge in graph.edges}
-    order = ["__start__", "inventory_input", "extract_requirements", "load_manual", "create_candidate",
+    order = ["__start__", "inventory_input", "extract_requirements", "load_manual", "run_original", "create_candidate",
              "prepare_run", "run_tool", "parse_evidence", "validate"]
     assert set(zip(order, order[1:])) <= edges
     assert ("diagnose_and_repair", "prepare_run") in edges
@@ -351,13 +353,13 @@ def test_task2_static_diagnostics_reach_repairer(tmp_path):
     case = make_task1_case(tmp_path)
     original = "# original\n" + SAFE_DOFILE.replace("insert_dft_logic", "exec forbidden")
     (case / "original.dofile").write_text(original, encoding="utf-8")
-    deps = fake_dependencies("success")
+    deps = scripted_dependencies([failed_cmd_result(), successful_scan_result()])
     repairer = deps.repairer
     observed = []
     def repair(client, requirements, current, diagnostics, history, chunks):
         assert current == original
         assert not history
-        assert any("exec forbidden" in item.source_line for item in diagnostics.fatal_errors)
+        assert any("CMD-0074" in item.source_line for item in diagnostics.fatal_errors)
         observed.append(current)
         return repairer(client, requirements, current, diagnostics, history, chunks)
     deps.repairer = repair
@@ -438,14 +440,15 @@ def test_route_precedence_for_terminal_conditions():
     assert route_after_validation(state) == "success"
 
 
-def test_task2_netlist_diagnosis_stops_before_any_tool_run(tmp_path):
+def test_task2_netlist_diagnosis_stops_after_original_tool_run(tmp_path):
     case = make_task1_case(tmp_path)
     (case / "original.dofile").write_text("# original\n" + SAFE_DOFILE, encoding="utf-8")
-    deps = scripted_dependencies([], diagnoses=[diagnosis("requires_netlist_repair")])
+    deps = scripted_dependencies([failed_cmd_result()], diagnoses=[diagnosis("requires_netlist_repair")])
     output = tmp_path / "output"
     result = run_agent(case, output, deps)
     assert result.status == "unsupported_netlist_repair"
-    assert audit(output)["tool_runs"] == []
+    assert len(audit(output)["tool_runs"]) == 1
+    assert audit(output)["tool_runs"][0]["role"] == "original"
 
 
 def test_fractional_wall_time_remains_valid_after_monotonic_start(tmp_path):
@@ -579,7 +582,7 @@ def test_late_candidate_model_never_prepares_another_run(tmp_path, stage):
     case = make_task1_case(tmp_path)
     if stage == "task2_repair":
         (case / "original.dofile").write_text("# original\n" + SAFE_DOFILE, encoding="utf-8")
-    deps = scripted_dependencies([failed_cmd_result()] if stage == "repair" else [])
+    deps = scripted_dependencies([failed_cmd_result()] if stage in {"repair", "task2_repair"} else [])
     now = timed_dependencies(deps)
     attr = "initial_generator" if stage == "generate" else "repairer"
     model = getattr(deps, attr)
@@ -592,9 +595,9 @@ def test_late_candidate_model_never_prepares_another_run(tmp_path, stage):
     result = run_agent(case, output, deps)
     assert result.status == "budget_exhausted"
     assert result.final_run is None
-    runs = 1 if stage == "repair" else 0
+    runs = 1 if stage in {"repair", "task2_repair"} else 0
     assert len(audit(output)["tool_runs"]) == runs
-    assert len(audit(output)["proposals"]) == runs
+    assert len(audit(output)["proposals"]) == (1 if stage == "repair" else 0)
     assert not (output / f"runs/R{runs + 1}").exists()
     assert not (output / "final_results").exists()
     if runs:
@@ -709,7 +712,7 @@ def test_repair_requests_receive_budget_left_after_failed_tool(tmp_path, task2):
         return result
     deps.client.transport, deps.tool_runner = timed, consumes
     assert run_agent(case, tmp_path / "output", deps).status == "success"
-    assert timeouts == [110.0, 110.0, 60.0]
+    assert timeouts == ([110.0, 60.0] if task2 else [110.0, 110.0, 60.0])
 
 
 @pytest.mark.parametrize("stage", ["extract", "generate", "task2_repair", "repair"])
@@ -718,7 +721,7 @@ def test_absolute_request_deadline_returns_before_blocked_transport_finishes(tmp
     (case / "limitations.md").write_text("wall time: 10.05 seconds", encoding="utf-8")
     if stage == "task2_repair":
         (case / "original.dofile").write_text("# original\n" + SAFE_DOFILE, encoding="utf-8")
-    deps = scripted_dependencies([failed_cmd_result()] if stage == "repair" else [])
+    deps = scripted_dependencies([failed_cmd_result()] if stage in {"repair", "task2_repair"} else [])
     deps.client.max_retries = 2
     timed_dependencies(deps)
     transport = deps.client.transport
@@ -750,7 +753,7 @@ def test_absolute_request_deadline_returns_before_blocked_transport_finishes(tmp
         assert len(calls) == target
         before = (output / "decision_log.json").read_bytes()
         assert deps.client.usage_history == []
-        assert len(audit(output)["tool_runs"]) == (1 if stage == "repair" else 0)
+        assert len(audit(output)["tool_runs"]) == (1 if stage in {"repair", "task2_repair"} else 0)
         assert not (output / "final_results").exists()
         release.set()
         workers[0].join(timeout=1.0)
