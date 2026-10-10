@@ -64,6 +64,7 @@ _TOTAL = re.compile(r"\b(?:DRC\s+)?Total\s+(?:DRC\s+)?violations\s*[:=]\s*(\d[\d
 _COUNT = re.compile(r"^\s*(?:x\s*|(?:count|violations?)\s*[:=]\s*|[:=|]\s*)(\d[\d,]*)\b", re.IGNORECASE)
 _COUNT_SUFFIX = re.compile(r"^\s*\(?\s*(\d[\d,]*)\s+violations?\b", re.IGNORECASE)
 _COUNT_TABLE = re.compile(r"^\s+(\d[\d,]*)(?:\s|$)")
+_COUNT_BEFORE_RULE = re.compile(r"There\s+were\s+(\d[\d,]*)\s+DRC\s+rule\s+['\"]?$", re.IGNORECASE)
 _LICENSE = re.compile(
     r"\blicen[sc](?:e|ing)\b.*\b(?:fail\w*|unavailable|denied|expired|error)\b"
     r"|\b(?:fail\w*|unable|cannot|could\s+not)\b.*\b(?:obtain|checkout|check\s+out|acquire|connect)\b.*\blicen[sc]e\b"
@@ -101,9 +102,10 @@ def parse_drc_text(text: str) -> list[DrcViolation]:
         for index, rule in enumerate(rules):
             end = rules[index + 1].start() if index + 1 < len(rules) else len(line)
             tail = line[rule.end():end]
-            count_match = _COUNT.search(tail) or _COUNT_SUFFIX.search(tail) or _COUNT_TABLE.search(tail)
-            is_record = bool(code and code.startswith("DFTDRC-"))
             prefix = line[:rule.start()]
+            count_match = (_COUNT.search(tail) or _COUNT_SUFFIX.search(tail)
+                           or _COUNT_TABLE.search(tail) or _COUNT_BEFORE_RULE.search(prefix))
+            is_record = bool(code and code.startswith("DFTDRC-"))
             header_prefix = _SEVERITY.sub("", prefix) if severity in {"WARNING", "WARN", "ERROR", "FATAL"} else prefix
             is_header = not header_prefix.strip(" |\t")
             if count_match:
@@ -122,7 +124,23 @@ def parse_drc_text(text: str) -> list[DrcViolation]:
 def parse_tool_log(text: str) -> DiagnosticSummary:
     """Retain every error and explicit total; downstream validation owns policy."""
     messages, fatal, license_errors, totals, commands, chain_facts, insertion_facts = [], [], [], [], [], [], []
+    scan_def_total = scan_def_success = scan_def_fail = None
+    in_scan_def = False
     for number, line in enumerate(text.splitlines(), 1):
+        if line.strip() == "#Begin examine scan DEF":
+            in_scan_def = True
+            scan_def_total = scan_def_success = scan_def_fail = None
+        elif in_scan_def:
+            if match := re.fullmatch(r"\s*Total scan chains checked:\s*(\d+)\s*", line):
+                scan_def_total = int(match.group(1))
+            elif match := re.fullmatch(r"\s*Success:\s*(\d+)\s*", line):
+                scan_def_success = int(match.group(1))
+            elif match := re.fullmatch(r"\s*Fail:\s*(\d+)\s*", line):
+                scan_def_fail = int(match.group(1))
+            elif line.strip() == "#End examine scan DEF":
+                if scan_def_total and scan_def_success == scan_def_total and scan_def_fail == 0:
+                    insertion_facts.append(ReportFact("insertion_complete", scan_def_total, line, number))
+                in_scan_def = False
         found_commands = _COMMAND.findall(line)
         commands.extend(command for command in found_commands if command not in commands)
         severity, code = _metadata(line)

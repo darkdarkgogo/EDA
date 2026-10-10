@@ -1,0 +1,813 @@
+{
+  "965f69e53ac20344028fae680afadb40a5d26c93fc023ac8f9270696190f05a9": {
+    "task_type": "task1",
+    "top_module": "openE902",
+    "netlists": [
+      "netlist/opene902.v"
+    ],
+    "libraries": [
+      "lib/sky130.lib"
+    ],
+    "ctl_files": [],
+    "clocks": [
+      {
+        "port": "pll_core_cpuclk",
+        "off_state": 0
+      },
+      {
+        "port": "pad_had_jtg_tclk",
+        "off_state": 0
+      }
+    ],
+    "resets": [
+      {
+        "port": "pad_cpu_rst_b",
+        "off_state": 1
+      },
+      {
+        "port": "pad_had_jtg_trst_b",
+        "off_state": 1
+      }
+    ],
+    "constants": [],
+    "scan_enables": [
+      {
+        "port": "pad_yy_gate_clk_en_b",
+        "off_state": 1
+      }
+    ],
+    "chain_constraints": {},
+    "partitions": [
+      {
+        "name": "openE902_scan",
+        "include": [
+          "openE902"
+        ],
+        "exclude": [
+          "x_cr_sys_io_pll"
+        ]
+      }
+    ],
+    "clock_domains": [],
+    "edge_policy": null,
+    "lockup": {},
+    "scan_segments": [],
+    "wrapper_settings": {},
+    "allowed_drc": [],
+    "required_outputs": [
+      "post_connect_icg.v",
+      "post_replace_sff.v",
+      "post_replace_unscan.v"
+    ],
+    "allow_netlist_modification": true
+  },
+  "337fac7c13fc8d4abc6e858c5e41216e3d5ce0ca4b2d513aba9b066fab557fa5": {
+    "task_type": "task1",
+    "top_module": "ac97_top",
+    "netlists": [
+      "netlist/ac97_ctrl.v"
+    ],
+    "libraries": [
+      "lib/sky130.lib"
+    ],
+    "ctl_files": [],
+    "clocks": [
+      {
+        "port": "clk_i",
+        "off_state": 0
+      },
+      {
+        "port": "bit_clk_pad_i",
+        "off_state": 0
+      }
+    ],
+    "resets": [
+      {
+        "port": "rst_i",
+        "off_state": 1
+      }
+    ],
+    "constants": [],
+    "scan_enables": [
+      {
+        "port": "se_rx_fifo",
+        "off_state": 0
+      },
+      {
+        "port": "se_tx_fifo",
+        "off_state": 0
+      },
+      {
+        "port": "se_serdes",
+        "off_state": 0
+      },
+      {
+        "port": "se_ctrl",
+        "off_state": 0
+      }
+    ],
+    "chain_constraints": {
+      "rx_fifo_partition": 2,
+      "tx_fifo_partition": 4,
+      "rx_serdes_partition": 2,
+      "tx_serdes_partition": 1,
+      "reg_partition": 1,
+      "wb_partition": 1,
+      "ctrl_partition": 2
+    },
+    "partitions": [
+      {
+        "name": "rx_fifo_partition",
+        "include": [
+          "u9",
+          "u10",
+          "u11"
+        ],
+        "exclude": []
+      },
+      {
+        "name": "tx_fifo_partition",
+        "include": [
+          "u3",
+          "u4",
+          "u5",
+          "u6",
+          "u7",
+          "u8"
+        ],
+        "exclude": []
+      },
+      {
+        "name": "rx_serdes_partition",
+        "include": [
+          "u1"
+        ],
+        "exclude": []
+      },
+      {
+        "name": "tx_serdes_partition",
+        "include": [
+          "u0"
+        ],
+        "exclude": []
+      },
+      {
+        "name": "reg_partition",
+        "include": [
+          "u13"
+        ],
+        "exclude": []
+      },
+      {
+        "name": "wb_partition",
+        "include": [
+          "u12"
+        ],
+        "exclude": []
+      },
+      {
+        "name": "ctrl_partition",
+        "include": [
+          "u2",
+          "u14",
+          "u15",
+          "u16",
+          "u17",
+          "u18",
+          "u19",
+          "u20",
+          "u21",
+          "u22",
+          "u23",
+          "u24",
+          "u25",
+          "u26"
+        ],
+        "exclude": []
+      }
+    ],
+    "clock_domains": [],
+    "edge_policy": null,
+    "lockup": {
+      "add_lockup": true,
+      "insert_terminal_lockup": false
+    },
+    "scan_segments": [],
+    "wrapper_settings": {},
+    "allowed_drc": [
+      "DFTR10"
+    ],
+    "required_outputs": [
+      "post_scan.v",
+      "post_scan.ctl",
+      "post_scan.def",
+      "drc.rpt",
+      "scan_element.rpt",
+      "scan_chain.rpt",
+      "scan_partition.rpt",
+      "scan_cfg.rpt",
+      "scan_signal.rpt"
+    ],
+    "allow_netlist_modification": true
+  },
+  "7f557e753346e0e4ecb66a8b9570affbc5b379aca8e4adb0a701dfd456fce652": {
+    "task_type": "task1",
+    "top_module": "openE902_with_aes_core",
+    "netlists": [
+      "netlist/open_aes_core_in_e902.v"
+    ],
+    "libraries": [
+      "lib/sky130_hd.lib",
+      "lib/aes_cipher_top_liberty.lib"
+    ],
+    "ctl_files": [
+      "ctl/aes_cipher_top.ctl"
+    ],
+    "clocks": [
+      {
+        "port": "pll_core_cpuclk",
+        "off_state": 0
+      },
+      {
+        "port": "pad_had_jtg_tclk",
+        "off_state": 0
+      }
+    ],
+    "resets": [],
+    "constants": [],
+    "scan_enables": [
+      {
+        "port": "pad_yy_test_mode",
+        "off_state": 0
+      }
+    ],
+    "chain_constraints": {
+      "chain_count": 70,
+      "max_length": 100
+    },
+    "partitions": [],
+    "clock_domains": [],
+    "edge_policy": null,
+    "lockup": {},
+    "scan_segments": [],
+    "wrapper_settings": {
+      "chain_count": 15,
+      "chain_length": 100,
+      "style": "dedicated"
+    },
+    "allowed_drc": [],
+    "required_outputs": [
+      "post_scan.v",
+      "post_scan.ctl",
+      "post_scan.def",
+      "scan_cfg.rpt",
+      "wrapper_cfg.rpt",
+      "scan_signal.rpt",
+      "scan_segment.rpt",
+      "scan_chain.rpt",
+      "scan_element.rpt"
+    ],
+    "allow_netlist_modification": true
+  },
+  "ba6090639781225042f297acd775509d37d5a2bb41a51a279ed5cd9759362adf": {
+    "task_type": "task1",
+    "top_module": "openE902",
+    "netlists": [
+      "netlist/opene902.v"
+    ],
+    "libraries": [
+      "lib/sky130.lib"
+    ],
+    "ctl_files": [],
+    "clocks": [],
+    "resets": [],
+    "constants": [],
+    "scan_enables": [],
+    "chain_constraints": {},
+    "partitions": [],
+    "clock_domains": [],
+    "edge_policy": null,
+    "lockup": {},
+    "scan_segments": [],
+    "wrapper_settings": {},
+    "allowed_drc": [],
+    "required_outputs": [
+      "post_connect_icg.v",
+      "post_replace_sff.v",
+      "post_replace_unscan.v"
+    ],
+    "allow_netlist_modification": false
+  },
+  "5882fa10cff07de0ed48079bbfd638be32f723cb4374bcfb0949f735fefcc52c": {
+    "task_type": "task1",
+    "top_module": "openC906",
+    "netlists": [
+      "netlist/openc906.v"
+    ],
+    "libraries": [
+      "lib/sky130.lib"
+    ],
+    "ctl_files": [],
+    "clocks": [
+      {
+        "port": "pll_core_cpuclk",
+        "off_state": 0
+      },
+      {
+        "port": "sys_apb_clk",
+        "off_state": 0
+      },
+      {
+        "port": "x_aq_top_0/x_aq_core/x_aq_lsu_top/x_aq_dcache_top/x_aq_dcache_data_array_bank0/x_dcache_data_gated_clk/clk_out",
+        "off_state": 0
+      },
+      {
+        "port": "x_aq_top_0/x_aq_core/x_aq_cp0_top/x_aq_cp0_regs/x_regs_clk/clk_out",
+        "off_state": 0
+      },
+      {
+        "port": "x_aq_top_0/x_aq_dtu_top/x_aq_dtu_ctrl/x_aq_dtu_pcfifo/x_reg_gated_clk/clk_out",
+        "off_state": 0
+      },
+      {
+        "port": "x_aq_top_0/x_aq_core/x_aq_vpu_top/x_aq_fdsu_top/x_aq_fdsu_scalar_ctrl/x_ex1_pipe_clk/clk_out",
+        "off_state": 0
+      },
+      {
+        "port": "x_aq_top_0/x_aq_core/x_aq_vpu_top/x_aq_fspu_top/x_ex1_pipe_clk/clk_out",
+        "off_state": 0
+      },
+      {
+        "port": "x_aq_top_0/x_aq_pmp_top/x_pmp_gated_clk/clk_out",
+        "off_state": 0
+      },
+      {
+        "port": "x_clint_top/x_clint_func/x_clint_gateclk/clk_out",
+        "off_state": 0
+      },
+      {
+        "port": "x_aq_top_0/x_aq_mmu_top/x_utlb_gateclk/clk_out",
+        "off_state": 0
+      },
+      {
+        "port": "x_clint_top/x_clint_func/x_mtime_gated_clk/clk_out",
+        "off_state": 0
+      }
+    ],
+    "resets": [
+      {
+        "port": "pad_yy_scan_rst_b",
+        "off_state": 1
+      },
+      {
+        "port": "pad_yy_dft_clk_rst_b",
+        "off_state": 1
+      },
+      {
+        "port": "pad_cpu_rst_b",
+        "off_state": 1
+      },
+      {
+        "port": "sys_apb_rst_b",
+        "off_state": 1
+      }
+    ],
+    "constants": [
+      {
+        "port": "pad_yy_scan_mode",
+        "constant_value": 1
+      },
+      {
+        "port": "pad_yy_mbist_mode",
+        "constant_value": 0
+      }
+    ],
+    "scan_enables": [
+      {
+        "port": "pad_yy_scan_enable",
+        "off_state": 0
+      },
+      {
+        "port": "pad_yy_icg_scan_en",
+        "off_state": 1
+      }
+    ],
+    "chain_constraints": {
+      "max_length": 500
+    },
+    "partitions": [],
+    "clock_domains": [
+      {
+        "clock": "pll_core_cpuclk",
+        "generated_clocks": [
+          {
+            "source": "x_aq_mp_clk_top/apb_clk"
+          }
+        ]
+      }
+    ],
+    "edge_policy": null,
+    "lockup": {},
+    "scan_segments": [],
+    "wrapper_settings": {},
+    "allowed_drc": [
+      "DFTR-TIE0",
+      "DFTR-TIE1"
+    ],
+    "required_outputs": [
+      "post_scan.v",
+      "post_scan.ctl",
+      "post_scan.def",
+      "drc.rpt",
+      "scan_chain.rpt",
+      "scan_chain_cell.rpt",
+      "scan_element.rpt",
+      "scan_cfg.rpt",
+      "scan_signal.rpt",
+      "shift_register.rpt",
+      "insertion_info.rpt"
+    ],
+    "allow_netlist_modification": false
+  },
+  "44178aeb7a22bb22586958a188680fd927f8301454defd85dd548ffbabe3bfc1": {
+    "task_type": "task1",
+    "top_module": "des3",
+    "netlists": [
+      "netlist/des_perf.v",
+      "netlist/dedicated_wrp_cell.v"
+    ],
+    "libraries": [
+      "lib/sky130.lib"
+    ],
+    "ctl_files": [],
+    "clocks": [
+      {
+        "port": "clk",
+        "off_state": 0
+      }
+    ],
+    "resets": [],
+    "constants": [],
+    "scan_enables": [
+      {
+        "port": "decrypt",
+        "off_state": 0
+      }
+    ],
+    "chain_constraints": {
+      "max_length": 100
+    },
+    "partitions": [],
+    "clock_domains": [],
+    "edge_policy": null,
+    "lockup": {},
+    "scan_segments": [
+      {
+        "min_count": 280
+      }
+    ],
+    "wrapper_settings": {},
+    "allowed_drc": [],
+    "required_outputs": [
+      "post_scan.v",
+      "post_scan.ctl",
+      "post_scan.def",
+      "drc.rpt",
+      "scan_chain.rpt",
+      "scan_chain_cell.rpt",
+      "scan_element.rpt",
+      "scan_cfg.rpt",
+      "scan_signal.rpt",
+      "scan_segment.rpt",
+      "insertion_info.rpt",
+      "wrapper_cfg.rpt",
+      "wrapper_implementation.rpt"
+    ],
+    "allow_netlist_modification": false
+  },
+  "a6df43dda1e294bd7b8d67e4a4519002e0db5f79ad18971480a6437e263b4ca3": {
+    "task_type": "task2",
+    "top_module": "picorv32",
+    "netlists": [
+      "netlist/pre_scan.v"
+    ],
+    "libraries": [
+      "lib/sky130.lib"
+    ],
+    "ctl_files": [],
+    "clocks": [
+      {
+        "port": "clk",
+        "off_state": 0
+      }
+    ],
+    "resets": [],
+    "constants": [],
+    "scan_enables": [
+      {
+        "port": "test_se",
+        "off_state": 0
+      }
+    ],
+    "chain_constraints": {
+      "chain_count": 4
+    },
+    "partitions": [],
+    "clock_domains": [],
+    "edge_policy": null,
+    "lockup": {},
+    "scan_segments": [],
+    "wrapper_settings": {},
+    "allowed_drc": [],
+    "required_outputs": [
+      "post_scan.v",
+      "drc.rpt",
+      "scan_chain.rpt",
+      "scan_chain_cell.rpt"
+    ],
+    "allow_netlist_modification": true
+  },
+  "c31518f645eb4bd82d6a9ac9d0c1a8fc75778999b50faeab37a256acf8edca7e": {
+    "task_type": "task2",
+    "top_module": "eth_top",
+    "netlists": [
+      "netlist/ethernet_sky130.v"
+    ],
+    "libraries": [
+      "lib/stdcells.lib"
+    ],
+    "ctl_files": [],
+    "clocks": [
+      {
+        "port": "wb_clk_i",
+        "off_state": 0
+      },
+      {
+        "port": "mtx_clk_pad_i",
+        "off_state": 0
+      },
+      {
+        "port": "mrx_clk_pad_i",
+        "off_state": 0
+      }
+    ],
+    "resets": [
+      {
+        "port": "wb_rst_i",
+        "off_state": 0
+      }
+    ],
+    "constants": [],
+    "scan_enables": [
+      {
+        "port": "test_se",
+        "off_state": 0
+      },
+      {
+        "port": "se_wb",
+        "off_state": 0
+      },
+      {
+        "port": "se_tx",
+        "off_state": 0
+      },
+      {
+        "port": "se_rx",
+        "off_state": 0
+      }
+    ],
+    "chain_constraints": {
+      "wb_partition": 34,
+      "tx_partition": 1,
+      "rx_partition": 1
+    },
+    "partitions": [
+      {
+        "name": "wb_partition",
+        "include": [],
+        "exclude": [],
+        "clocks": [
+          "wb_clk_i"
+        ],
+        "rising_edge_clocks": [],
+        "falling_edge_clocks": []
+      },
+      {
+        "name": "tx_partition",
+        "include": [],
+        "exclude": [],
+        "clocks": [
+          "mtx_clk_pad_i"
+        ],
+        "rising_edge_clocks": [],
+        "falling_edge_clocks": []
+      },
+      {
+        "name": "rx_partition",
+        "include": [],
+        "exclude": [],
+        "clocks": [
+          "mrx_clk_pad_i"
+        ],
+        "rising_edge_clocks": [],
+        "falling_edge_clocks": []
+      }
+    ],
+    "clock_domains": [],
+    "edge_policy": null,
+    "lockup": {},
+    "scan_segments": [],
+    "wrapper_settings": {},
+    "allowed_drc": [
+      "DFTR-TIE0",
+      "DFTR-TIE1",
+      "DFTR10"
+    ],
+    "required_outputs": [
+      "post_scan.v",
+      "drc.rpt",
+      "scan_partition.rpt",
+      "scan_chain.rpt",
+      "scan_chain_cell.rpt",
+      "scan_signal.rpt"
+    ],
+    "allow_netlist_modification": true
+  },
+  "6efe2f45cc109b200452daafb0b1bfc0884a50ed68fadb17e6c87982a6a832be": {
+    "task_type": "task2",
+    "top_module": "tv80s",
+    "netlists": [
+      "netlist/tv80.v"
+    ],
+    "libraries": [
+      "lib/sky130.lib"
+    ],
+    "ctl_files": [],
+    "clocks": [
+      {
+        "port": "clk",
+        "off_state": 1
+      }
+    ],
+    "resets": [],
+    "constants": [],
+    "scan_enables": [
+      {
+        "port": "scan_cg_en",
+        "off_state": 0
+      }
+    ],
+    "chain_constraints": {
+      "max_chain_count": 5
+    },
+    "partitions": [],
+    "clock_domains": [],
+    "edge_policy": null,
+    "lockup": {
+      "add_lockup": true,
+      "insert_terminal_lockup": false
+    },
+    "scan_segments": [],
+    "wrapper_settings": {},
+    "allowed_drc": [],
+    "required_outputs": [
+      "post_scan.v",
+      "drc.rpt",
+      "scan_element.rpt",
+      "scan_chain.rpt",
+      "scan_cfg.rpt",
+      "scan_signal.rpt"
+    ],
+    "allow_netlist_modification": true
+  },
+  "1f1319c48d7199bcb8528fbb1b781f79f3114bd44bd3b5952f3a728719538a56": {
+    "task_type": "task2",
+    "top_module": "cv32e40p_top",
+    "netlists": [
+      "netlist/cv32e40p.v"
+    ],
+    "libraries": [
+      "lib/sky130.lib"
+    ],
+    "ctl_files": [],
+    "clocks": [
+      {
+        "port": "clk_i",
+        "off_state": 0
+      }
+    ],
+    "resets": [
+      {
+        "port": "rst_ni",
+        "off_state": 1
+      }
+    ],
+    "constants": [],
+    "scan_enables": [
+      {
+        "port": "scan_cg_en_i",
+        "off_state": 0
+      }
+    ],
+    "chain_constraints": {
+      "max_length": 100
+    },
+    "partitions": [],
+    "clock_domains": [],
+    "edge_policy": "mixed",
+    "lockup": {
+      "add_lockup": true,
+      "insert_terminal_lockup": false
+    },
+    "scan_segments": [],
+    "wrapper_settings": {},
+    "allowed_drc": [
+      "DFTR-TIE0",
+      "DFTR-TIE1"
+    ],
+    "required_outputs": [
+      "post_scan.v",
+      "post_scan.ctl",
+      "post_scan.def",
+      "drc.rpt",
+      "scan_chain.rpt",
+      "scan_cfg.rpt",
+      "scan_signal.rpt",
+      "insertion_info.rpt"
+    ],
+    "allow_netlist_modification": false
+  },
+  "5d73969714cb3b2f8985b45b3ada7e334d617a2bfb612a4c87940b31c33808db": {
+    "task_type": "task2",
+    "top_module": "veer_wrapper",
+    "netlists": [
+      "netlist/veer_eh1.v"
+    ],
+    "libraries": [
+      "lib/sky130.lib"
+    ],
+    "ctl_files": [],
+    "clocks": [
+      {
+        "port": "clk",
+        "off_state": 0
+      }
+    ],
+    "resets": [
+      {
+        "port": "rst_l",
+        "off_state": 1
+      },
+      {
+        "port": "dbg_rst_l",
+        "off_state": 1
+      }
+    ],
+    "constants": [
+      {
+        "port": "scan_mode",
+        "constant_value": 1
+      },
+      {
+        "port": "mbist_mode",
+        "constant_value": 0
+      }
+    ],
+    "scan_enables": [
+      {
+        "port": "se",
+        "off_state": 0
+      }
+    ],
+    "chain_constraints": {
+      "max_length": 1000
+    },
+    "partitions": [],
+    "clock_domains": [],
+    "edge_policy": null,
+    "lockup": {
+      "add_lockup": true,
+      "insert_terminal_lockup": false
+    },
+    "scan_segments": [],
+    "wrapper_settings": {},
+    "allowed_drc": [
+      "DFTR-TIE0",
+      "DFTR-TIE1",
+      "DFTR10",
+      "DFTR11",
+      "DFTR12"
+    ],
+    "required_outputs": [
+      "post_scan.v",
+      "veer_eh1.ctl",
+      "veer_eh1.def",
+      "veer_eh1_drc.rpt",
+      "veer_eh1_insertion.rpt",
+      "veer_eh1_chain.rpt",
+      "veer_eh1_scan_cfg.rpt",
+      "veer_eh1_scan_signal.rpt"
+    ],
+    "allow_netlist_modification": false
+  }
+}

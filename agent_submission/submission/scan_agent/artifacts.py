@@ -269,16 +269,25 @@ def validate_references(
     clock: Callable[[], float] = time.monotonic,
 ) -> None:
     """Check nested file/path references and evidence locators before publication."""
+    verified_paths: set[str] = set()
+
     def check_path(value: Any) -> None:
         check_deadline(deadline_monotonic, clock, "audit reference validation")
         if not isinstance(value, str):
             raise BrokenReferenceError("path reference must be a string")
+        if value in verified_paths:
+            return
         path = _relative_path(output_dir, value)
         if not path.exists():
             raise BrokenReferenceError(f"reference does not exist: {value}")
+        verified_paths.add(value)
 
     def visit(value: Any, key: str = "") -> None:
         check_deadline(deadline_monotonic, clock, "audit reference validation")
+        if key in {"requested_json", "observed_json"}:
+            # Requirement values may contain domain fields named source/file;
+            # they are data, not audit artifact references.
+            return
         if key == "locator" and (not isinstance(value, str) or not value.strip()):
             raise BrokenReferenceError("evidence locator must be nonempty")
         if key == "final_run" and value is not None:

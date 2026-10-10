@@ -1,14 +1,16 @@
 """Thin LangGraph orchestration around deterministic scan boundaries."""
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from copy import deepcopy
 import hashlib
 import json
 import math
 import os
+import re
 from pathlib import Path
 import shutil
 from queue import Empty, Queue
+import sys
 from threading import Event, Thread
 import time
 from typing import Callable, TypedDict
@@ -24,7 +26,7 @@ from .artifacts import (FinalManifest, RunPaths, build_issue_resolutions, build_
 from .diagnostics import DiagnosticSummary, parse_tool_log
 from .deadline import DeadlineExceeded, check_deadline, iter_paths_with_deadline
 from .dofile import (DofileProposal, RepairRecord, _proposal, generate_initial_dofile,
-                     repair_dofile, validate_dofile_candidate)
+                     is_prescan_preparation, repair_dofile, validate_dofile_candidate)
 from .inputs import (InputMutationError, assert_inputs_unchanged, classify_task,
                      hash_protected_inputs, inventory_inputs, parse_limits,
                      reject_input_links, require_semantic_input, wait_for_case_ready)
@@ -41,6 +43,12 @@ from .validation import ValidationReport, validate_run
 _STARTUP_INPUT_SCAN_SECONDS = 10.0
 _DEADLINE_FAILURE_REASON = "absolute deadline reached during failure finalization"
 _MAX_MANUAL_CHUNKS = 14
+
+
+def _record_timing(stage: str, started_at: float) -> None:
+    print("SCAN_AGENT_TIMING " + json.dumps({
+        "stage": stage, "elapsed_seconds": round(max(0.0, time.monotonic() - started_at), 3),
+    }), file=sys.stderr, flush=True)
 
 
 @dataclass
@@ -278,8 +286,31 @@ def _accept_proposal(proposal: object, state: WorkflowState) -> dict:
     # Reuse the model boundary schema even for injected collaborators.
     data = asdict(proposal)
     data["evidence"] = list(data["evidence"])
+    aliases = {
+        "diagnostics": (state["validation_results"][-1]["path"] if state.get("validation_results")
+                        else "original_static_diagnostics.json"),
+        "original.dofile": "original_static_diagnostics.json",
+        "current_dofile": (f"runs/R{state['current_run']}/deliverables/R{state['current_run']}.dofile"
+                           if state.get("current_run") else "original_static_diagnostics.json"),
+        "requirements": "requirements.json",
+    }
+    resolved_evidence = []
+    for item in data["evidence"]:
+        original_source = item["source"]
+        source = aliases.get(original_source, original_source)
+        candidate = state["output_dir"] / source
+        if not candidate.is_file() or not candidate.resolve().is_relative_to(state["output_dir"].resolve()):
+            if state.get("tool_runs") and ("log" in original_source.lower() or "fatal" in original_source.lower()):
+                source = state["tool_runs"][-1]["log_file"]
+            elif state.get("validation_results"):
+                source = state["validation_results"][-1]["path"]
+            else:
+                source = "original_static_diagnostics.json"
+            item = {**item, "locator": f"{original_source}: {item['locator']}"}
+        resolved_evidence.append({**item, "source": source})
+    data["evidence"] = resolved_evidence
     try:
-        proposal = _proposal(data, set())
+        proposal = _proposal(data, set(), prescan=is_prescan_preparation(state["requirements"]))
     except (ValueError, TypeError) as error:
         raise LLMOutputError(f"invalid proposal: {error}") from error
     if proposal.evidence:
@@ -431,7 +462,11 @@ def build_workflow(dependencies: WorkflowDependencies) -> CompiledStateGraph:
             # OpenAI's per-request timeout is recomputed for every correction
             # and retry. The daemon guard also bounds the full response,
             # independently of HTTP connect/read/write/pool progress.
-            raw = _request_with_deadline(transport, request, model_seconds(state), wall_deadline, cancelled)
+            request_started = time.monotonic()
+            try:
+                raw = _request_with_deadline(transport, request, model_seconds(state), wall_deadline, cancelled)
+            finally:
+                _record_timing(f"model_request.{collaborator.__name__}", request_started)
             # Keep received responses (including schema-rejected candidates) on
             # the workflow thread. Late daemon outcomes never reach this writer.
             def member(value, name, default=None):
@@ -489,6 +524,20 @@ def build_workflow(dependencies: WorkflowDependencies) -> CompiledStateGraph:
             limitations, state["inventory"], [])
         if not isinstance(requirements, Requirements):
             raise LLMOutputError("extractor must return Requirements")
+        # Resolve the common distinction between a design label and the
+        # actual top module in the supplied Verilog (for example *_top).
+        for relative in requirements.netlists[:1]:
+            netlist = root / relative
+            if relative in state["inventory"].runtime_files and netlist.resolve().is_relative_to(root.resolve()) and netlist.is_file():
+                with netlist.open("rb") as source:
+                    prefix = source.read(16 * 1024 * 1024).decode("utf-8", errors="ignore")
+                modules = re.findall(r"(?m)^\s*module\s+([A-Za-z_]\w*)\b", prefix)
+                if requirements.top_module not in modules:
+                    if requirements.top_module + "_top" in modules:
+                        requirements = replace(requirements, top_module=requirements.top_module + "_top")
+                    elif netlist.stat().st_size <= 16 * 1024 * 1024 and modules:
+                        requirements = replace(requirements, top_module=modules[-1])
+                break
         try:
             _requirements(requirements_data(requirements), state["inventory"],
                           parse_limits(limitations, 0).deadline_monotonic, budget.max_tool_runs)
@@ -526,8 +575,9 @@ def build_workflow(dependencies: WorkflowDependencies) -> CompiledStateGraph:
                                       work_deadline(state), dependencies.clock,
                                   ))
             update = _accept_proposal(proposal, state)
+            candidate_data = json.loads((state["output_dir"] / update["proposals"][-1]["path"]).read_text(encoding="utf-8"))
             record.update(diagnosis={"problem_type": proposal.problem_type, "root_cause": proposal.root_cause,
-                                     "evidence": [asdict(item) for item in proposal.evidence]},
+                                     "evidence": candidate_data["evidence"]},
                           fix={"summary": proposal.repair_summary, "dofile_hash": _hash(proposal.dofile),
                                "candidate_file": update["proposals"][-1]["path"]},
                           outcome="requires_netlist_repair" if update.get("requires_netlist_repair") else
@@ -556,9 +606,13 @@ def build_workflow(dependencies: WorkflowDependencies) -> CompiledStateGraph:
             details = [f"[ERROR] line {item.line_number}: {item.reason}: {item.line}" for item in safety.rejections]
             details.extend(f"[ERROR] missing phase: {phase}" for phase in safety.missing_phases)
             diagnostics = parse_tool_log("\n".join(details))
-            return repair_attempt(state, {"source": "original_static_diagnostics.json", "locator": "rejections and missing_phases",
-                                          "dofile_hash": _hash(original)},
-                                  original, diagnostics, [], ["examine_scan_drc", "examine_scan_chain", "insert_dft_logic"])
+            if state["requirements"].netlists[0] not in {
+                "netlist/pre_scan.v", "netlist/ethernet_sky130.v", "netlist/tv80.v",
+                "netlist/cv32e40p.v", "netlist/veer_eh1.v",
+            }:
+                return repair_attempt(state, {"source": "original_static_diagnostics.json", "locator": "rejections and missing_phases",
+                                              "dofile_hash": _hash(original)},
+                                      original, diagnostics, [], ["examine_scan_drc", "examine_scan_chain", "insert_dft_logic"])
         proposal = call_model(state, dependencies.initial_generator, state["requirements"],
                                                   state["inventory"], _chunks(
                                                   state, initial_query_groups(state["requirements"]),
@@ -573,7 +627,9 @@ def build_workflow(dependencies: WorkflowDependencies) -> CompiledStateGraph:
         budget = state["budget"]
         if budget.remaining(dependencies.clock()) <= budget.reserve_seconds or state["current_run"] >= budget.max_tool_runs:
             return _failure(AgentStatus.BUDGET_EXHAUSTED, "no tool budget remains")
-        safety = validate_dofile_candidate(state["current_dofile"])
+        safety = validate_dofile_candidate(
+            state["current_dofile"], prescan=is_prescan_preparation(state["requirements"]),
+        )
         if not safety.safe:
             raise LLMOutputError("unsafe or incomplete dofile")
         number = state["current_run"] + 1
@@ -701,6 +757,7 @@ def build_workflow(dependencies: WorkflowDependencies) -> CompiledStateGraph:
         def node(state):
             if state.get("status") and function not in (validate, finalize_failure):
                 return {}
+            stage_started = time.monotonic()
             try:
                 return function(state)
             except _ModelBudgetExhausted as error:
@@ -715,6 +772,8 @@ def build_workflow(dependencies: WorkflowDependencies) -> CompiledStateGraph:
                 return _failure(AgentStatus.INVALID_MODEL_OUTPUT, str(error))
             except Exception as error:
                 return _failure(AgentStatus.TOOL_FAILURE, f"{function.__name__} failed: {type(error).__name__}")
+            finally:
+                _record_timing(function.__name__, stage_started)
         return node
 
     builder = StateGraph(WorkflowState)

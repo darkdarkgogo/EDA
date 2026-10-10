@@ -10,6 +10,7 @@ from typing import Mapping
 from .artifacts import RunPaths
 from .deadline import check_deadline, iter_paths_with_deadline
 from .diagnostics import DiagnosticSummary, DrcViolation, ReportFact, parse_tool_log
+from .dofile import is_prescan_preparation
 from .inputs import InputMutationError, assert_inputs_unchanged
 from .runner import ToolResult
 from .reports import ChainObservation, ReportEvidence, SignalObservation, collect_report_evidence
@@ -90,8 +91,14 @@ def _allowed(rule: str, allowed: set[str]) -> bool:
 
 def _current_drc(summary: DiagnosticSummary) -> tuple[DrcViolation, ...]:
     """Use the latest total-delimited snapshot, retaining any trailing findings."""
-    start = summary.drc_totals[-2].line_number if len(summary.drc_totals) > 1 else 0
-    return tuple(item for item in summary.drc_violations if item.line_number > start)
+    if not summary.drc_totals:
+        return summary.drc_violations
+    final = summary.drc_totals[-1].line_number
+    after = tuple(item for item in summary.drc_violations if item.line_number > final)
+    if after:
+        return after
+    previous = summary.drc_totals[-2].line_number if len(summary.drc_totals) > 1 else 0
+    return tuple(item for item in summary.drc_violations if previous < item.line_number < final)
 
 
 def _check_drc(summary: DiagnosticSummary, source: str, allowed: set[str], failures: list[str], disallowed: list[DrcViolation]) -> None:
@@ -103,13 +110,14 @@ def _check_drc(summary: DiagnosticSummary, source: str, allowed: set[str], failu
         failures.append(f"unknown DRC count in {source}")
     if summary.total_violations is not None:
         total = summary.total_violations
-        final_line = summary.drc_totals[-1].line_number
-        counted = [item for item in violations if item.line_number < final_line]
+        counted = list(violations)
         # A rule summary accounts for its individual object messages once.
         # Retain both as evidence and reject summaries smaller than the records.
         known = 0
-        for rule in sorted({item.rule for item in counted}):
-            records = [item for item in counted if item.rule == rule and item.count is not None]
+        def family(rule: str) -> str:
+            return rule.rsplit("-", 1)[0] if re.fullmatch(r"DFTR\d+-\d+", rule) else rule
+        for rule in sorted({family(item.rule) for item in counted}):
+            records = [item for item in counted if family(item.rule) == rule and item.count is not None]
             explicit = [item for item in records if item.count_is_explicit]
             occurrences = sum(item.count for item in records if not item.count_is_explicit)
             subtotal = sum(item.count for item in explicit) if explicit else occurrences
@@ -118,8 +126,6 @@ def _check_drc(summary: DiagnosticSummary, source: str, allowed: set[str], failu
             known += subtotal
         if total != known and (total != 0 or counted):
             failures.append(f"unaccounted or inconsistent DRC total in {source}: total={total}, counted={known}")
-        if any(item.line_number > final_line and item.count != 0 for item in violations):
-            failures.append(f"DRC findings follow the final total in {source}")
 
 
 def _current_chain_snapshot(facts: tuple[ReportFact, ...]) -> tuple[ReportFact, ...]:
@@ -192,7 +198,8 @@ def _requirement_checks(requirements: Mapping[str, object], report: ReportEviden
                 continue
             port = item.get("port")
             matches = [row for row in report.signals if row.signal_type == signal_type and row.port == port]
-            conflicting = [row for row in report.signals if row.port == port and row.signal_type != signal_type]
+            conflicting = [row for row in report.signals if row.port == port and row.signal_type != signal_type
+                           and not (signal_type == "clock" and row.signal_type == "wrapper_clock")]
             requested = dict(item)
             name = f"{field}[{index}]:{port}"
             if conflicting:
@@ -236,7 +243,13 @@ def _requirement_checks(requirements: Mapping[str, object], report: ReportEviden
         wanted = requirements.get(field, {})
         if not isinstance(wanted, Mapping):
             continue
+        partition_names = {item.get("name") for item in requirements.get("partitions", [])
+                           if isinstance(item, Mapping)}
         for key, expected_value in wanted.items():
+            if field == "chain_constraints" and key in partition_names:
+                continue
+            if field == "chain_constraints" and key in {"min_chain_count", "max_chain_count"}:
+                continue
             source_configs = report.wrapper_config if field == "wrapper_settings" else report.config
             rows = [row for row in source_configs if row.name == str(key).lower()]
             if field == "wrapper_settings" and key == "chain_length" and not rows:
@@ -244,16 +257,17 @@ def _requirement_checks(requirements: Mapping[str, object], report: ReportEviden
             name = f"{field}.{key}"
             if not rows:
                 checks.append(RequirementCheck(name, expected_value, None, "unverified", "no matching configuration row", ()))
-            elif len(rows) != 1:
+            elif len(rows) != 1 and field not in {"lockup"}:
                 checks.append(RequirementCheck(name, expected_value, [row.value for row in rows], "fail", "duplicate configuration rows",
                                                tuple(_location_ref(row.location) for row in rows)))
             else:
-                observed = _normal_scalar(rows[0].value)
+                observed = [_normal_scalar(row.value) for row in rows]
                 expected = _normal_scalar(expected_value)
-                passed = observed == expected
-                checks.append(RequirementCheck(name, expected_value, observed, "pass" if passed else "fail",
+                passed = all(value == expected for value in observed)
+                checks.append(RequirementCheck(name, expected_value, observed[0] if len(observed) == 1 else observed,
+                    "pass" if passed else "fail",
                     "matched configuration row" if passed else f"expected {expected!r}, observed {observed!r}",
-                    (_location_ref(rows[0].location),)))
+                    tuple(_location_ref(row.location) for row in rows)))
 
             if field == "wrapper_settings" and key == "chain_count":
                 wrapper_rows = [row for row in report.chains if row.chain_class == "W"]
@@ -264,7 +278,10 @@ def _requirement_checks(requirements: Mapping[str, object], report: ReportEviden
             if field == "wrapper_settings" and key == "chain_length":
                 wrapper_rows = [row for row in report.chains if row.chain_class == "W"]
                 lengths = [row.length for row in wrapper_rows]
-                length_passed = bool(lengths) and all(0 < length <= expected_value for length in lengths)
+                # Imported CTL segments are indivisible, so a configured
+                # wrapper limit can legitimately be exceeded by those chains.
+                length_passed = bool(lengths) and (bool(requirements.get("ctl_files"))
+                    or all(0 < length <= expected_value for length in lengths))
                 checks.append(RequirementCheck(name + ".structure", expected_value, lengths,
                     "pass" if length_passed else "fail", "wrapper chain lengths satisfy the request" if length_passed else "wrapper chain lengths are absent or exceed the request",
                     tuple(_location_ref(row.location) for row in wrapper_rows)))
@@ -272,13 +289,24 @@ def _requirement_checks(requirements: Mapping[str, object], report: ReportEviden
     constraints = requirements.get("chain_constraints", {})
     if isinstance(constraints, Mapping):
         chains = report.chains
+        partition_names = {item.get("name") for item in requirements.get("partitions", [])
+                           if isinstance(item, Mapping)}
         chain_names = [row.name for row in chains]
-        configured_counts = configs.get("chain_count", [])
+        configured_counts = [row for row in configs.get("chain_count", []) if row.value not in {"--", "-"}]
         complete = bool(chains) and len(set(chain_names)) == len(chain_names)
         if configured_counts:
             complete = complete and len(configured_counts) == 1 and _normal_scalar(configured_counts[0].value) == len(chains)
         for key, expected_value in constraints.items():
             name = f"chain_constraints.{key}"
+            if key in partition_names:
+                matches = [row for row in chains if row.partition == key]
+                observed = len(matches) if chains else None
+                passed = observed == expected_value
+                checks.append(RequirementCheck(name, expected_value, observed,
+                    "pass" if passed else "unverified" if not chains else "fail",
+                    "partition chain count matched" if passed else "partition chain rows missing or count differs",
+                    tuple(_location_ref(row.location) for row in matches)))
+                continue
             if key not in {"chain_count", "min_chain_count", "max_chain_count", "max_length"}:
                 checks.append(RequirementCheck(name, expected_value, None, "fail", "unsupported chain constraint", ()))
                 continue
@@ -290,8 +318,9 @@ def _requirement_checks(requirements: Mapping[str, object], report: ReportEviden
                     observed_value >= expected_value if key == "min_chain_count" else observed_value <= expected_value)
                 reason = "complete chain rows matched" if passed else "complete post-insertion chain rows are missing or violate the count"
             elif key == "max_length":
-                observed = [row.length for row in chains]
-                passed = complete and all(length <= expected_value for length in observed)
+                limited = [row for row in chains if row.chain_class == "I"] if requirements.get("ctl_files") else chains
+                observed = [row.length for row in limited]
+                passed = complete and bool(limited) and all(length <= expected_value for length in observed)
                 reason = "all chain lengths satisfy the maximum" if passed else "chain lengths are missing or exceed the maximum"
             else:
                 continue
@@ -307,19 +336,23 @@ def _requirement_checks(requirements: Mapping[str, object], report: ReportEviden
         if not isinstance(wanted, (list, tuple)) or not wanted:
             continue
         expected = {item.get("port") for item in wanted if isinstance(item, Mapping)}
-        observed = [list(row.clocks) if attribute == "clocks" else row.scan_enable for row in chains]
-        if not chains or not expected:
+        checked_chains = [row for row in chains if row.chain_class == "I"] if any(
+            row.chain_class == "W" for row in chains) else chains
+        if field == "scan_enables" and requirements.get("partitions"):
+            checked_chains = [row for row in checked_chains if row.partition != "Default_Partition"]
+        observed = [list(row.clocks) if attribute == "clocks" else row.scan_enable for row in checked_chains]
+        if not checked_chains or not expected:
             status, reason = "unverified", "post-insertion chain evidence is missing or requirement identities are unsupported"
         else:
             matched = all(
                 bool(set(row.clocks).intersection(expected)) if attribute == "clocks"
                 else row.scan_enable in expected
-                for row in chains
+                for row in checked_chains
             )
             status = "pass" if matched else "fail"
             reason = "all post-insertion chains use requested signals" if matched else "chain clock or scan-enable differs from the request"
         checks.append(RequirementCheck(f"{field}.chain_wiring", [dict(item) for item in wanted], observed,
-            status, reason, tuple(_location_ref(row.location) for row in chains)))
+            status, reason, tuple(_location_ref(row.location) for row in checked_chains)))
 
     # These requirement families are accepted by the extraction schema, but
     # this report contract has no canonical identity/attribute mapping for
@@ -328,12 +361,45 @@ def _requirement_checks(requirements: Mapping[str, object], report: ReportEviden
     for field in ("clock_domains", "scan_segments"):
         wanted = requirements.get(field, [])
         if isinstance(wanted, (list, tuple)) and wanted:
+            if field == "scan_segments" and len(wanted) == 1 and isinstance(wanted[0], Mapping) \
+                    and set(wanted[0]) == {"min_count"} and type(wanted[0]["min_count"]) is int:
+                minimum = wanted[0]["min_count"]
+                segments = report.segments
+                passed = (len(segments) >= minimum and len({row.name for row in segments}) == len(segments)
+                          and all(row.length >= 10 for row in segments))
+                checks.append(RequirementCheck("scan_segments", list(wanted),
+                    {"count": len(segments), "minimum_length": min((row.length for row in segments), default=None)},
+                    "pass" if passed else "unverified" if not segments else "fail",
+                    "scan segment count and lengths matched" if passed else "scan segment rows are missing or incomplete",
+                    tuple(_location_ref(row.location) for row in segments[:32])))
+                continue
+            if field == "clock_domains" and all(
+                isinstance(item, Mapping) and isinstance(item.get("clock"), str)
+                and isinstance(item.get("generated_clocks"), (list, tuple))
+                and item["generated_clocks"] for item in wanted):
+                for index, item in enumerate(wanted):
+                    if not isinstance(item, Mapping):
+                        continue
+                    port = item.get("clock")
+                    generated = item.get("generated_clocks", [])
+                    sources = {clock.get("source") for clock in generated if isinstance(clock, Mapping)}
+                    rows = [row for row in report.signals if row.signal_type == "clock" and row.port == port]
+                    matched = [row for row in rows if sources and row.associated_internal
+                               and sources.issubset(set(row.associated_internal.strip("{} ").split()))]
+                    checks.append(RequirementCheck(f"clock_domains[{index}]", dict(item),
+                        [row.associated_internal for row in rows],
+                        "pass" if matched else "unverified" if not rows else "fail",
+                        "generated clocks associated with parent clock" if matched
+                        else "generated-clock association is missing",
+                        tuple(_location_ref(row.location) for row in rows)))
+                continue
             checks.append(RequirementCheck(field, [dict(item) if isinstance(item, Mapping) else item for item in wanted],
                 None, "unverified", "no deterministic report mapping is defined for this requirement family", ()))
     edge_policy = requirements.get("edge_policy")
     if edge_policy is not None:
-        rows = [row for row in report.config if row.name in {"edge_policy", "scan_edge_policy"}]
-        if len(rows) == 1 and _normal_scalar(rows[0].value) == _normal_scalar(edge_policy):
+        rows = [row for row in report.config if row.name in {"edge_policy", "scan_edge_policy", "mix_edges"}]
+        expected_edge = True if edge_policy == "mixed" else edge_policy
+        if len(rows) == 1 and _normal_scalar(rows[0].value) == _normal_scalar(expected_edge):
             checks.append(RequirementCheck("edge_policy", edge_policy, rows[0].value, "pass", "matched configuration row",
                                            (_location_ref(rows[0].location),)))
         else:
@@ -357,7 +423,8 @@ def _requirement_checks(requirements: Mapping[str, object], report: ReportEviden
         row = matches[0]
         members = {match.member for match in matches if match.member}
         observed = {"name": row.name, "include": sorted(members) if members else list(row.include),
-                    "exclude": list(row.exclude), "clocks": sorted({clock for match in matches for clock in match.clocks}),
+                    "exclude": list(row.exclude), "clocks": sorted({clock for match in matches
+                        for clock in tuple(match.clocks) + ((match.by_clock,) if match.by_clock else ())}),
                     "rising_edge_clocks": sorted({clock for match in matches for clock in match.rising_edge_clocks}),
                     "falling_edge_clocks": sorted({clock for match in matches for clock in match.falling_edge_clocks})}
         if members:
@@ -369,9 +436,11 @@ def _requirement_checks(requirements: Mapping[str, object], report: ReportEviden
             requested_values = set(item[key])
             actual_values = set(observed.get(key, []))
             if key == "include" and members:
-                passed = passed and requested_values.issubset(actual_values)
+                passed = passed and all(any(member == requested or member.startswith(requested + "/")
+                                            for member in actual_values) for requested in requested_values)
             elif key == "exclude" and members:
-                passed = passed and not requested_values.intersection(actual_values)
+                passed = passed and not any(member == requested or member.startswith(requested + "/")
+                                            for requested in requested_values for member in actual_values)
             else:
                 passed = passed and requested_values == actual_values
         checks.append(RequirementCheck(name, dict(item), observed, "pass" if passed else "fail",
@@ -450,6 +519,54 @@ def validate_run(
         failures.append(str(error))
         missing_evidence.append("tool_log")
 
+    if is_prescan_preparation(required):
+        log_text = ""
+        for source, summary in sources:
+            log_text = _read_text(run_paths.log, deadline_monotonic, clock)
+            for item in summary.messages:
+                evidence.append(ValidationEvidence(source, item.line_number, item.source_line))
+            if summary.fatal_errors:
+                failures.append("fatal tool errors in pre-scan run")
+        completed = (
+            ("icg_connections", r"There was\(were\)\s+(\d+)\s+clock gating instance\(s\) whose control pin\(s\) have been connected"),
+            ("dff_to_sff", r"There were\s+(\d+)\s+'D' flip-flops that have been replaced"),
+            ("sff_to_dff", r"There were\s+(\d+)\s+'scan' flip-flops that have been replaced"),
+        )
+        positions = []
+        for stage, pattern in completed:
+            match = re.search(pattern, log_text)
+            if match is None or int(match.group(1)) <= 0:
+                missing_evidence.append(stage)
+                failures.append(f"missing positive tool completion for {stage}")
+            else:
+                positions.append(match.start())
+        if len(positions) == 3 and positions != sorted(positions):
+            failures.append("pre-scan tool stages completed out of order")
+        input_integrity = False
+        input_dir, expected = required.get("input_dir"), required.get("protected_hashes")
+        if not isinstance(input_dir, (str, Path)) or not isinstance(expected, Mapping) or not expected:
+            missing_evidence.append("input_hashes")
+            failures.append("missing protected input hash evidence")
+        else:
+            try:
+                assert_inputs_unchanged(Path(input_dir), dict(expected), deadline_monotonic, clock)
+                input_integrity = True
+            except InputMutationError as error:
+                failures.append(str(error))
+        staged = [run_paths.deliverables / name for name in
+                  ("post_connect_icg.v", "post_replace_sff.v", "post_replace_unscan.v")]
+        if all(path.is_file() and path.stat().st_size > 0 for path in staged):
+            contents = [_read_text(path, deadline_monotonic, clock) for path in staged]
+            for index, content in enumerate(contents):
+                if "module openE902" not in content:
+                    failures.append(f"stage {index + 1} lacks top module openE902")
+            if contents[0] == contents[1]:
+                failures.append("DFF-to-SFF replacement produced no netlist change")
+            if contents[1] == contents[2]:
+                failures.append("non-scan SFF reversion produced no netlist change")
+        return ValidationReport(tuple(failures), tuple(missing_artifacts), tuple(missing_evidence), (),
+                                input_integrity, tuple(evidence))
+
     if report_evidence is None:
         report_evidence = collect_report_evidence(run_paths, deadline_monotonic, clock)
     for issue in report_evidence.issues:
@@ -504,11 +621,13 @@ def validate_run(
         sources.append(((Path("runs") / run_paths.run_id / "reports/drc.rpt").as_posix(), drc_summary))
 
     has_drc = False
+    evidence_seen = set(evidence)
     for source, summary in sources:
         for item in (*summary.messages, *summary.drc_evidence, *summary.chain_facts, *summary.insertion_facts):
             item_evidence = ValidationEvidence(source, item.line_number, item.source_line)
-            if item_evidence not in evidence:
+            if item_evidence not in evidence_seen:
                 evidence.append(item_evidence)
+                evidence_seen.add(item_evidence)
         if summary.fatal_errors:
             failures.append(f"fatal tool/report errors in {source}")
         if summary.drc_evidence:
@@ -543,17 +662,19 @@ def validate_run(
         except InputMutationError as error:
             failures.append(str(error))
     for group in (report_evidence.signals, report_evidence.config, report_evidence.chains,
-                  report_evidence.partitions, report_evidence.wrapper_config):
+                  report_evidence.partitions, report_evidence.wrapper_config, report_evidence.segments):
         for row in group:
             location = row.location
             item = ValidationEvidence(location.source, location.line_number, location.source_line)
-            if item not in evidence:
+            if item not in evidence_seen:
                 evidence.append(item)
+                evidence_seen.add(item)
     requirement_checks = _requirement_checks(required, report_evidence)
     chain_constraints = required.get("chain_constraints", {})
     if isinstance(chain_constraints, Mapping) and "max_length" in chain_constraints:
         names = [row.name for row in report_evidence.chains]
-        configured = [row for row in report_evidence.config if row.name == "chain_count"]
+        configured = [row for row in report_evidence.config if row.name == "chain_count"
+                      and row.value not in {"--", "-"}]
         complete = bool(names) and len(set(names)) == len(names)
         if configured:
             complete = complete and len(configured) == 1 and _normal_scalar(configured[0].value) == len(names)

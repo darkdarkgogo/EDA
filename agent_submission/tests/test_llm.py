@@ -1,5 +1,6 @@
 import json
 import sys
+from copy import deepcopy
 from dataclasses import asdict
 from types import SimpleNamespace
 
@@ -158,6 +159,23 @@ def test_from_env_wraps_chat_completions_and_disables_sdk_retries(monkeypatch):
     assert requests[0]["response_format"] == {"type": "json_object"}
 
 
+def test_dashscope_deepseek_disables_default_thinking(monkeypatch):
+    monkeypatch.setenv("LLM_API_KEY", "key")
+    monkeypatch.setenv("LLM_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
+    monkeypatch.setenv("LLM_MODEL", "deepseek-v4-pro")
+    requests = []
+
+    def sdk(**_kwargs):
+        def create(**request):
+            requests.append(request)
+            return '{"ok":true}'
+        return SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+
+    monkeypatch.setitem(sys.modules, "openai", SimpleNamespace(OpenAI=sdk))
+    assert LLMClient.from_env().complete_json("s", "u").data == {"ok": True}
+    assert requests[0]["extra_body"] == {"enable_thinking": False}
+
+
 def test_extract_returns_every_typed_field_and_serializes_only_supplied_facts():
     transport = FakeTransport([json.dumps(requirement_data())])
     result = extract(transport)
@@ -167,13 +185,23 @@ def test_extract_returns_every_typed_field_and_serializes_only_supplied_facts():
     assert set(payload) == {"task_text", "limitations_text", "inventory", "manual_chunks"}
     assert payload["inventory"] == {"runtime_files": ["pre_scan.v", "cells.lib"]}
     assert payload["manual_chunks"] == [{"page": 2, "chunk_index": 0, "text": "load_lib loads a Liberty file"}]
+    assert "Each partitions item has exactly name" in transport.requests[0]["messages"][0]["content"]
+
+
+def test_extract_canonicalizes_only_inventoried_input_path_spellings():
+    data = {**requirement_data(), "netlists": ["input/pre_scan.v"], "libraries": ["/input/cells.lib"]}
+    transport = FakeTransport([json.dumps(data)])
+    result = extract(transport)
+    assert result.netlists == ["pre_scan.v"]
+    assert result.libraries == ["cells.lib"]
+    assert transport.calls == 1
 
 
 @pytest.mark.parametrize("change", [
     {"netlists": ["missing.v"]}, {"allow_netlist_modification": "false"},
     {"chain_constraints": {"chain_count": True}}, {"chain_constraints": {"max_length": 0}},
     {"required_outputs": ["../post_scan.v"]}, {"wall_time_seconds": 999},
-    {"max_tool_runs": 99}, {"task_type": "task2"}, {"clocks": ["clk"]},
+    {"max_tool_runs": 99}, {"clocks": ["clk"]},
     {"clocks": [{"port": "clk", "off_state": 2}]},
     {"clocks": [{"port": "clk", "off_state": 0, "surprise": True}]},
     {"scan_enables": [{"port": "scan_en"}]},
@@ -188,6 +216,23 @@ def test_requirement_schema_or_input_failure_gets_one_correction(change):
     assert extract(transport).top_module == "top"
     assert transport.calls == 2
     assert "validation_errors" in transport.requests[1]["messages"][-1]["content"]
+
+
+def test_task_type_is_taken_from_runtime_inventory():
+    transport = FakeTransport([json.dumps({**requirement_data(), "task_type": "task2"})])
+    assert extract(transport).task_type == "task1"
+    assert transport.calls == 1
+
+
+def test_one_correction_reports_all_record_key_errors() -> None:
+    bad = deepcopy(requirement_data())
+    bad["clocks"] = [{"name": "clk"}]
+    bad["resets"] = [{"name": "rst_n", "active_low": True}]
+    bad["scan_enables"] = [{"name": "scan_en", "off_state": 0}]
+    transport = FakeTransport([json.dumps(bad), json.dumps(requirement_data())])
+    assert extract(transport).top_module == "top"
+    errors = json.loads(transport.requests[1]["messages"][-1]["content"])["validation_errors"]
+    assert all(field in errors for field in ("clocks[0]", "resets[0]", "scan_enables[0]"))
 
 
 @pytest.mark.parametrize("field", list(requirement_data()))

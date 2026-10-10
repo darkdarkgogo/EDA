@@ -162,6 +162,22 @@ def test_invalid_references_are_rejected(tmp_path: Path, reference: str) -> None
         validate_references(tmp_path, {"requirement_mapping": [{"evidence": {"path": reference, "locator": "line 1"}}]})
 
 
+def test_repeated_evidence_path_is_resolved_once(tmp_path: Path, monkeypatch) -> None:
+    (tmp_path / "scan.rpt").write_text("report\n", encoding="utf-8")
+    original = artifacts._relative_path
+    calls = []
+
+    def tracked(root, value):
+        calls.append(value)
+        return original(root, value)
+
+    monkeypatch.setattr(artifacts, "_relative_path", tracked)
+    validate_references(tmp_path, {"evidence": [
+        {"source": "scan.rpt", "locator": f"line {line}"} for line in range(100)
+    ]})
+    assert calls == ["scan.rpt"]
+
+
 def test_decision_log_closes_nested_references_and_is_atomic(tmp_path: Path, monkeypatch) -> None:
     paths = _real_run(tmp_path)
     calls = []

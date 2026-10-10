@@ -13,7 +13,8 @@ FAKE_TOOL = Path(__file__).with_name("fake_dftexp_scan.py")
 RUNNER_DOFILE = """load_lib /input/lib/stdcells.lib
 load_netlist /input/netlist/design.v
 present_design top
-examine_scan_drc -verbose -file reports/drc.rpt
+examine_scan_drc
+rpt_scan_drc_violation > reports/drc.rpt
 examine_scan_chain
 insert_dft_logic
 rpt_scan_signal > reports/scan_signal.rpt

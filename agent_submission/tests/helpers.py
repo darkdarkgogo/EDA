@@ -15,7 +15,8 @@ load_netlist /input/netlist/design.v
 present_design top
 set_scan_signal -type clock -port clk -off_state 0
 set_scan_signal -type scan_enable -port scan_en -off_state 0
-examine_scan_drc -verbose -file reports/drc.rpt
+examine_scan_drc
+rpt_scan_drc_violation > reports/drc.rpt
 examine_scan_chain
 insert_dft_logic
 rpt_scan_signal > reports/scan_signal.rpt

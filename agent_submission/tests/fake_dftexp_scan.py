@@ -50,12 +50,9 @@ def main() -> int:
     dofile = args.f.read_text(encoding="utf-8")
     requested = {}
     for line in dofile.splitlines():
-        match = re.match(r"\s*(rpt_scan_(?:signal|cfg|chain|partition)|rpt_wrapper_cfg)\b.*?>\s*([^\s]+)\s*$", line)
+        match = re.match(r"\s*(rpt_scan_(?:signal|cfg|chain|partition|drc_violation)|rpt_wrapper_cfg)\b.*?>\s*([^\s]+)\s*$", line)
         if match:
-            requested[match.group(1)] = match.group(2)
-        match = re.match(r"\s*examine_scan_drc\b.*?-file\s+(\S+)", line)
-        if match:
-            requested["drc"] = match.group(1)
+            requested["drc" if match.group(1) == "rpt_scan_drc_violation" else match.group(1)] = match.group(2)
         match = re.match(r"\s*dump_netlist\b.*?-file\s+(\S+)", line)
         if match:
             requested["netlist"] = match.group(1)

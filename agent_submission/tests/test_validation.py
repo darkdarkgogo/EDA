@@ -49,6 +49,32 @@ def test_real_complete_evidence_passes(tmp_path):
     assert any(item.source_line == "Total violations: 0" for item in report.evidence)
 
 
+def test_prescan_requires_real_three_stage_completion(tmp_path):
+    paths = create_run(tmp_path / "output", 1)
+    log = "\n".join((
+        "[INFO] [  SCAN-7602] There was(were) 68 clock gating instance(s) whose control pin(s) have been connected.",
+        "[INFO] [  SCAN-7600] There were 2651 'D' flip-flops that have been replaced.",
+        "[INFO] [  SCAN-7600] There were 76 'scan' flip-flops that have been replaced.",
+    )) + "\n"
+    paths.log.write_text(log, encoding="utf-8")
+    for name, text in (("post_connect_icg.v", "module openE902; wire a; endmodule"),
+                       ("post_replace_sff.v", "module openE902; wire b; endmodule"),
+                       ("post_replace_unscan.v", "module openE902; wire c; endmodule")):
+        (paths.deliverables / name).write_text(text, encoding="utf-8")
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+    (input_dir / "netlist.v").write_text("module openE902; endmodule", encoding="utf-8")
+    requirements = {"required_outputs": ["post_connect_icg.v", "post_replace_sff.v", "post_replace_unscan.v"],
+                    "allowed_drc": [], "input_dir": input_dir, "protected_hashes": hash_protected_inputs(input_dir)}
+    result = ToolResult(0, False, 1.0, paths.log, tuple(requirements["required_outputs"]))
+    assert validate_run(requirements, result, parse_tool_log(log), paths).passed
+    bad_log = log.replace("There were 76", "There were 0")
+    paths.log.write_text(bad_log, encoding="utf-8")
+    report = validate_run(requirements, result, parse_tool_log(bad_log), paths)
+    assert not report.passed
+    assert "sff_to_dff" in report.missing_evidence
+
+
 def test_oversized_required_config_line_fails_even_without_config_requirements(tmp_path):
     requirements, result, diagnostics, paths = _case(tmp_path)
     (paths.reports / "scan_cfg.rpt").write_text("x" * 1_048_577, encoding="utf-8")
@@ -389,6 +415,24 @@ def test_unknown_chain_requirement_cannot_be_silently_ignored(tmp_path):
 def test_individual_drc_records_and_summary_are_not_double_counted(tmp_path):
     log = "[WARNING] [DFTDRC-4001] Clock of 'reg0' inactive (DFTR9-1)\n[WARNING] [DFTDRC-4001] Clock of 'reg1' inactive (DFTR9-1)\nDFTR9-1 x2\nTotal violations: 2\n"
     assert validate_run(*_case(tmp_path, log, allowed_drc=["DFTR9"])).passed
+
+
+def test_tool_total_precedes_subrule_and_family_summary(tmp_path):
+    log = ("Total violations: 1\n"
+           "[WARNING] [DFTDRC-4006] Clock 'clk' is connected to data input 'D' of 'DFF' 'u0'. (DFTR10-1)\n"
+           "[INFO] [DFTDRC-7001] There were 1 DRC rule 'DFTR10' fails.\n")
+    requirements, result, diagnostics, paths = _case(tmp_path, log, allowed_drc=["DFTR10"])
+    (paths.reports / "drc.rpt").write_text("Total violations: 1\nThere were 1 DRC rule 'DFTR10' fails.\n", encoding="utf-8")
+    assert validate_run(requirements, result, diagnostics, paths).passed
+
+
+def test_reported_scan_segments_must_meet_count_and_length(tmp_path):
+    requirements, result, diagnostics, paths = _case(tmp_path, scan_segments=[{"min_count": 2}])
+    segment = paths.reports / "scan_segment.rpt"
+    segment.write_text("Name SegmentProperty Length SiPin SoPin\nseg0 user_defined 16 a b\nseg1 user_defined 10 c d\n", encoding="utf-8")
+    assert validate_run(requirements, result, diagnostics, paths).passed
+    segment.write_text("Name SegmentProperty Length SiPin SoPin\nseg0 user_defined 16 a b\nseg1 user_defined 9 c d\n", encoding="utf-8")
+    assert not validate_run(requirements, result, diagnostics, paths).passed
 
 
 def test_partial_chain_lengths_do_not_prove_maximum(tmp_path):

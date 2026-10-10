@@ -20,7 +20,8 @@ load_netlist /input/pre_scan.v
 present_design top
 set_scan_signal -type clock -port clk -off_state 0
 set_scan_signal -type scan_enable -port scan_en -off_state 0
-examine_scan_drc -verbose -file reports/drc.rpt
+examine_scan_drc
+rpt_scan_drc_violation > reports/drc.rpt
 examine_scan_chain
 insert_dft_logic
 rpt_scan_signal > reports/scan_signal.rpt
@@ -38,6 +39,38 @@ def proposal(text=SAFE, **overrides):
 
 def requirements():
     return Requirements(**requirement_data())
+
+
+def test_case1_uses_documented_three_stage_prescan_flow():
+    data = requirement_data()
+    data.update(top_module="openE902", netlists=["netlist/opene902.v"],
+                libraries=["lib/sky130.lib"],
+                required_outputs=["post_connect_icg.v", "post_replace_sff.v", "post_replace_unscan.v"])
+    candidate = generate_initial_dofile(None, Requirements(**data), None, [])
+    assert validate_dofile_candidate(candidate.dofile, prescan=True).safe
+    assert candidate.dofile.count("insert_dft_logic") == 3
+    assert "examine_scan_chain" not in candidate.dofile
+    assert "set_scan_element false x_cr_core_top/x_cr_sys_io_pll" in candidate.dofile
+
+
+def test_picorv32_declares_golden_scan_mapping_and_icg_enable():
+    data = requirement_data()
+    data.update(task_type="task2", top_module="picorv32", netlists=["netlist/pre_scan.v"],
+                libraries=["lib/sky130.lib"], chain_constraints={"chain_count": 4})
+    dofile = generate_initial_dofile(None, Requirements(**data), None, []).dofile
+    assert "set_scan_cell_mapping sky130_fd_sc_hd__dfxtp_1 sky130_fd_sc_hd__sdfxtp_1" in dofile
+    assert "set_scan_signal -type scan_enable -port test_se -off_state 0 -usage all" in dofile
+    assert "set_scan_cfg -chain_count 4 -mix_clocks false -mix_edges false" in dofile
+
+
+def test_prescan_rejects_missing_or_reordered_stages():
+    data = requirement_data()
+    data.update(top_module="openE902", netlists=["netlist/opene902.v"],
+                libraries=["lib/sky130.lib"],
+                required_outputs=["post_connect_icg.v", "post_replace_sff.v", "post_replace_unscan.v"])
+    script = generate_initial_dofile(None, Requirements(**data), None, []).dofile
+    assert not validate_dofile_candidate(script.replace("insert_dft_logic -replace_unscan\n", ""), prescan=True).safe
+    assert not validate_dofile_candidate(script.replace("-connect_icg_only", "-stitch"), prescan=True).safe
 
 
 @pytest.mark.parametrize("line", [
@@ -63,6 +96,56 @@ def test_all_required_phases_and_read_only_protected_paths_are_accepted():
     assert report.safe
     assert report.rejections == ()
     assert report.missing_phases == ()
+
+
+def test_manual_partition_command_is_allowed_but_invented_alias_is_rejected():
+    allowed = SAFE.replace("examine_scan_drc\n", "add_scan_partition p1 -include core/u0 -exclude core/u1\nexamine_scan_drc\n")
+    assert validate_dofile_candidate(allowed).safe
+    invented = allowed.replace("add_scan_partition", "set_scan_partition")
+    assert any("unsupported Tcl command" in item.reason for item in validate_dofile_candidate(invented).rejections)
+
+
+def test_manual_drc_command_has_no_destination_option():
+    invalid = SAFE.replace("examine_scan_drc\n", "examine_scan_drc -file reports/drc.rpt\n")
+    assert any("takes no report destination" in item.reason for item in validate_dofile_candidate(invalid).rejections)
+
+
+def test_generation_prompt_uses_the_drc_syntax_accepted_by_validator():
+    transport = FakeTransport([json.dumps(proposal())])
+    generate_initial_dofile(LLMClient(transport=transport, model="m"), requirements(), InputInventory([]), [])
+    system = transport.requests[0]["messages"][0]["content"]
+    assert "rpt_scan_drc_violation > reports/drc.rpt" in system
+    assert validate_dofile_candidate(SAFE).safe
+
+
+def test_generation_canonicalizes_static_model_aliases_without_a_second_call():
+    aliased = (SAFE.replace("/input/cells.lib", "input/cells.lib")
+               .replace("/input/pre_scan.v", "pre_scan.v")
+               .replace("present_design top", "present_design -top top")
+               .replace("examine_scan_drc\nrpt_scan_drc_violation > reports/drc.rpt",
+                        "examine_scan_drc > reports/drc.rpt"))
+    transport = FakeTransport([json.dumps(proposal(aliased))])
+    result = generate_initial_dofile(
+        LLMClient(transport=transport, model="m"), requirements(),
+        InputInventory(["cells.lib", "pre_scan.v"]), [],
+    )
+    assert transport.calls == 1
+    assert "present_design top" in result.dofile
+    assert "examine_scan_drc\nrpt_scan_drc_violation > reports/drc.rpt" in result.dofile
+    assert "load_lib /input/cells.lib" in result.dofile
+    assert "load_netlist /input/pre_scan.v" in result.dofile
+    assert validate_dofile_candidate(result.dofile).safe
+
+
+def test_initial_generation_rejects_unverified_netlist_diagnosis():
+    unsupported = proposal("", problem_type="requires_netlist_repair",
+                           evidence=[{"source": "examine_scan_drc", "locator": "reports/drc.rpt"}])
+    transport = FakeTransport([json.dumps(unsupported), json.dumps(proposal())])
+    result = generate_initial_dofile(LLMClient(transport=transport, model="m"),
+                                     requirements(), InputInventory([]), [])
+    assert result.problem_type == "dofile"
+    assert transport.calls == 2
+    assert "No tool has run yet" in transport.requests[0]["messages"][0]["content"]
 
 
 @pytest.mark.parametrize("destination", [
@@ -169,8 +252,8 @@ def test_unknown_tool_commands_with_documented_prefixes_are_rejected(line):
 
 def test_configuration_commands_must_precede_drc():
     moved = SAFE.replace("set_scan_signal -type scan_enable -port scan_en -off_state 0\n", "")
-    moved = moved.replace("examine_scan_drc -verbose -file reports/drc.rpt",
-                          "examine_scan_drc -verbose -file reports/drc.rpt\nset_scan_signal -type scan_enable -port scan_en -off_state 0")
+    moved = moved.replace("examine_scan_drc\n",
+                          "examine_scan_drc\nset_scan_signal -type scan_enable -port scan_en -off_state 0\n")
     report = validate_dofile_candidate(moved)
     assert not report.safe
     assert any("must precede examine_scan_drc" in item.reason for item in report.rejections)
@@ -261,7 +344,7 @@ def test_rejections_retain_exact_whitespace_and_line_number():
     line = '  dump_netlist -file "/submission/post_scan.v"  '
     report = validate_dofile_candidate(SAFE + line + "\n")
     rejection = next(item for item in report.rejections if item.line == line)
-    assert rejection.line_number == 14
+    assert rejection.line_number == 15
     assert "protected" in rejection.reason
 
 

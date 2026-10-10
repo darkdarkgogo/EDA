@@ -67,6 +67,13 @@ class PartitionObservation:
 
 
 @dataclass(frozen=True)
+class SegmentObservation:
+    name: str
+    length: int
+    location: EvidenceLocation
+
+
+@dataclass(frozen=True)
 class ReportIssue:
     source: str
     line_number: int
@@ -82,6 +89,7 @@ class ReportEvidence:
     partitions: tuple[PartitionObservation, ...] = ()
     issues: tuple[ReportIssue, ...] = ()
     wrapper_config: tuple[ConfigObservation, ...] = ()
+    segments: tuple[SegmentObservation, ...] = ()
 
 
 REPORT_FILES = {
@@ -121,10 +129,18 @@ def _records(
             yield number, line, stripped
 
 
+def _fixed_columns(header_line: str, row_line: str) -> list[str]:
+    """Keep empty cells in the tool's aligned table output."""
+    starts = [match.start() for match in re.finditer(r"\S+", header_line)]
+    return [row_line[start:(starts[index + 1] if index + 1 < len(starts) else None)].strip(" |")
+            for index, start in enumerate(starts)]
+
+
 def parse_signal_report(text: str | Iterable[str], source: str = "reports/scan_signal.rpt", *,
                         deadline_monotonic: float | None = None, clock: Callable[[], float] = time.monotonic):
     rows, issues = [], []
     header = None
+    fixed_header = None
     for number, line, stripped in _records(text, source, deadline_monotonic, clock):
         columns = stripped.strip("|").split()
         lowered = [item.lower() for item in columns]
@@ -133,14 +149,18 @@ def parse_signal_report(text: str | Iterable[str], source: str = "reports/scan_s
             for optional in ("offstate", "usage", "view", "constantvalue", "associatedinternal", "ownerpartition"):
                 if optional in lowered:
                     header[optional] = lowered.index(optional)
+            fixed_header = line if re.search(r"\s{2,}", line) else None
             continue
-        if header is None or stripped.startswith("Design:"):
+        if header is None or stripped.startswith("Design:") or stripped.isdigit():
             continue
-        values = stripped.strip("|").split()
+        values = _fixed_columns(fixed_header, line) if fixed_header else stripped.strip("|").split()
         try:
             if max(header.values()) >= len(values):
                 raise ValueError("row has fewer values than the report header")
             signal_type = values[header["signaltype"]].lower()
+            embedded_view = None
+            if match := re.fullmatch(r"([a-z_]+)\((spec|existing)\)", signal_type):
+                signal_type, embedded_view = match.groups()
             port = values[header["port"]]
             if signal_type not in {"clock", "reset", "scan_enable", "constant", "scan_data_in", "scan_data_out",
                                    "wrapper_clock", "wrp_data_in", "wrp_data_out", "wrp_in_shift_en",
@@ -148,9 +168,9 @@ def parse_signal_report(text: str | Iterable[str], source: str = "reports/scan_s
                 raise ValueError(f"unsupported signal type: {signal_type}")
             def get(key):
                 index = header.get(key)
-                return values[index] if index is not None and index < len(values) and values[index] not in {"-", "--"} else None
+                return values[index] if index is not None and index < len(values) and values[index] not in {"", "-", "--"} else None
             rows.append(SignalObservation(signal_type, port, get("offstate"), get("constantvalue"),
-                                          get("usage"), get("view"), get("associatedinternal"), get("ownerpartition"),
+                                          get("usage"), get("view") or embedded_view, get("associatedinternal"), get("ownerpartition"),
                                           EvidenceLocation(source, number, line)))
         except (IndexError, ValueError) as error:
             issues.append(ReportIssue(source, number, line, str(error)))
@@ -167,7 +187,7 @@ def parse_config_report(text: str | Iterable[str], source: str = "reports/scan_c
         if re.search(r"(?:Scan|Wrapper)ConfigurationParameter\s+Value", stripped, re.IGNORECASE):
             in_table = True
             continue
-        if not in_table or stripped.startswith("Design:"):
+        if not in_table or stripped.startswith(("Design:", "Scan partition:")) or stripped.isdigit():
             continue
         fields = stripped.strip("|").split(None, 1)
         if len(fields) != 2:
@@ -191,7 +211,7 @@ def parse_chain_report(text: str | Iterable[str], source: str = "reports/scan_ch
         if re.match(r"Chain\s+Length\s+Input\s+Output", stripped, re.IGNORECASE):
             in_table = True
             continue
-        if not in_table or stripped.startswith("Design:"):
+        if not in_table or stripped.startswith("Design:") or stripped.isdigit():
             continue
         parts = stripped.strip("|").split()
         try:
@@ -221,28 +241,32 @@ def parse_partition_report(text: str | Iterable[str], source: str = "reports/sca
                            deadline_monotonic: float | None = None, clock: Callable[[], float] = time.monotonic):
     rows, issues = [], []
     header = None
+    fixed_header = None
+    current_partition = None
     for number, line, stripped in _records(text, source, deadline_monotonic, clock):
         columns = stripped.strip("|").split()
         lowered = [item.lower() for item in columns]
-        if "partition" in lowered and ("include" in lowered or "cell" in lowered):
+        if "partition" in lowered and ("include" in lowered or "cell" in lowered or "instancename" in lowered):
             header = lowered
+            fixed_header = line if re.search(r"\s{2,}", line) else None
             continue
-        if header is None or stripped.startswith("Design:"):
+        if header is None or stripped.startswith("Design:") or stripped.isdigit():
             continue
-        values = stripped.strip("|").split()
+        values = _fixed_columns(fixed_header, line) if fixed_header else stripped.strip("|").split()
         try:
             if len(values) < 2:
                 raise ValueError("partition row has fewer than two columns")
             index = {name: i for i, name in enumerate(header)}
             get = lambda name: values[index[name]] if name in index and index[name] < len(values) else ""
-            partition = get("partition")
+            partition = get("partition") or current_partition
             if not partition:
                 raise ValueError("partition name is missing")
+            current_partition = partition
             def words(name):
                 value = get(name)
                 return tuple(part.strip("{},") for item in value.split() if item not in {"-", "{}"}
                              for part in item.split(",") if part.strip("{},"))
-            cell = get("cell") or None
+            cell = get("cell") or get("instancename") or None
             rows.append(PartitionObservation(partition, words("include"), words("exclude"), words("clocks"),
                 words("risingedgeclocks"), words("fallingedgeclocks"), cell,
                 get("byclock") or None, get("byclockedge") or None,
@@ -283,5 +307,14 @@ def collect_report_evidence(
             rows, parse_issues = (), (ReportIssue(source, 0, "", str(error)),)
         groups[group] = rows
         issues.extend(parse_issues)
+    segments = []
+    segment_path = run_paths.reports / "scan_segment.rpt"
+    if segment_path.is_file() and segment_path.resolve().is_relative_to(run_paths.root.resolve()):
+        with segment_path.open("r", encoding="utf-8", errors="replace") as stream:
+            for number, line, _ in _records(_bounded_lines(stream, deadline_monotonic, clock),
+                                            "reports/scan_segment.rpt", deadline_monotonic, clock):
+                if match := re.match(r"\s*(seg\d+)\s+user_defined\s+(\d+)\s+", line):
+                    segments.append(SegmentObservation(match.group(1), int(match.group(2)),
+                        EvidenceLocation(f"runs/{run_paths.run_id}/reports/scan_segment.rpt", number, line)))
     return ReportEvidence(groups["signals"], groups["config"], groups["chains"], groups["partitions"],
-                          tuple(issues), groups["wrapper_config"])
+                          tuple(issues), groups["wrapper_config"], tuple(segments))

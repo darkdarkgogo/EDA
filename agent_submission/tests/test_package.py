@@ -92,13 +92,17 @@ def test_submission_has_no_committed_or_copyable_caches_or_secrets() -> None:
     assert "COPY .env" not in (ROOT / "Dockerfile").read_text(encoding="utf-8")
 
 
-def test_entrypoint_forwards_arguments_and_prevents_runtime_bytecode() -> None:
+def test_entrypoint_parses_arguments_and_prevents_runtime_bytecode() -> None:
     assert "submission/agent_system text eol=lf" in (ROOT / ".gitattributes").read_text(encoding="utf-8")
     script = (ROOT / "submission/agent_system").read_bytes()
     assert b"\r" not in script
-    assert script.decode("utf-8") == (
-        '#!/usr/bin/env bash\nset -euo pipefail\ncd /submission\nexec python3 -B main.py "$@"\n'
-    )
+    text = script.decode("utf-8")
+    assert text.startswith("#!/usr/bin/env bash\nset -euo pipefail\n")
+    assert "-input|--input)" in text
+    assert "-output|--output)" in text
+    assert '[[ ! -d "$INPUT_DIR" ]]' in text
+    assert 'mkdir -p "$OUTPUT_DIR"' in text
+    assert 'exec python3 -B main.py -input "$INPUT_DIR" -output "$OUTPUT_DIR"' in text
 
 
 def test_readme_documents_formal_local_and_failure_contract() -> None:
